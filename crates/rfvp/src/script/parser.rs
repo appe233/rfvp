@@ -8,6 +8,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
+use crate::script::string_patch::StringPatchTable;
+
 #[derive(Debug, Clone, Copy, Default)]
 pub enum Nls {
     #[default]
@@ -55,6 +57,7 @@ pub struct Parser {
     game_title: String,
     pub syscall_count: u16,
     pub syscalls: HashMap<usize, Syscall>,
+    string_patch: Option<Arc<StringPatchTable>>,
 }
 
 impl Parser {
@@ -79,6 +82,7 @@ impl Parser {
             game_title: String::new(),
             syscall_count: 0,
             syscalls: HashMap::new(),
+            string_patch: None,
         };
 
         parser.parser()?;
@@ -259,6 +263,17 @@ impl Parser {
 
     pub fn get_syscall(&self, id: u16) -> Option<&Syscall> {
         self.syscalls.get(&(id as usize))
+    }
+
+    pub fn with_string_patch(mut self, string_patch: Arc<StringPatchTable>) -> Self {
+        self.string_patch = Some(string_patch);
+        self
+    }
+
+    pub fn patched_string(&self, offset: u32) -> Option<&str> {
+        self.string_patch
+            .as_ref()
+            .and_then(|patch| patch.get(offset))
     }
 
     pub fn get_all_syscalls(&self) -> &HashMap<usize, Syscall> {

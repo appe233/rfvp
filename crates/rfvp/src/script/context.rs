@@ -581,7 +581,11 @@ pub fn apply_snapshot_v1(&mut self, snap: &ContextSnapshotV1) {
         // intended return values and control flow.
         let addr = self.cursor as u32; // points to the first byte of the string payload
 
-        let s = parser.read_cstring(self.cursor, len)?;
+        let original = parser.read_cstring(self.cursor, len)?;
+        let s = parser
+            .patched_string(addr)
+            .map(str::to_owned)
+            .unwrap_or(original);
         self.cursor += len;
 
         // log::info!("push_string: {}", &s);
@@ -1185,4 +1189,52 @@ pub fn apply_snapshot_v1(&mut self, snap: &ContextSnapshotV1) {
         }
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::script::string_patch::StringPatchTable;
+
+    fn parser_with_string(bytes: &[u8]) -> Parser {
+        let mut parser = Parser::default();
+        parser.buffer = Arc::new(bytes.to_vec());
+        parser
+    }
+
+    #[test]
+    fn push_string_without_patch_uses_original_string() {
+        let mut parser = parser_with_string(&[0x0e, 5, b't', b'e', b's', b't', 0, 0]);
+        let mut ctx = Context::new(0, 0);
+
+        ctx.push_string(&mut parser).unwrap();
+
+        match ctx.pop().unwrap() {
+            Variant::ConstString(s, addr) => {
+                assert_eq!(s, "test");
+                assert_eq!(addr, 2);
+            }
+            other => panic!("expected ConstString, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn push_string_patch_replaces_content_but_keeps_address() {
+        let patch = Arc::new(StringPatchTable::from_pairs_for_test(&[(2, "patched")]));
+        let mut parser =
+            parser_with_string(&[0x0e, 5, b't', b'e', b's', b't', 0, 0]).with_string_patch(patch);
+        let mut ctx = Context::new(0, 0);
+
+        ctx.push_string(&mut parser).unwrap();
+
+        match ctx.pop().unwrap() {
+            Variant::ConstString(s, addr) => {
+                assert_eq!(s, "patched");
+                assert_eq!(addr, 2);
+            }
+            other => panic!("expected ConstString, got {other:?}"),
+        }
+    }
 }

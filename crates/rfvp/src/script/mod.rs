@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 pub mod context;
 pub mod parser;
+pub mod string_patch;
 pub mod global;
 pub mod opcode;
 pub mod inst;
@@ -568,4 +569,3 @@ fn vm_mod(a: Variant, b: Variant) -> Variant {
 pub trait VmSyscall {
     fn do_syscall(&mut self, name: &str, args: Vec<Variant>) -> anyhow::Result<Variant>;
 }
-

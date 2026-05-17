@@ -1771,6 +1771,20 @@ impl AppBuilder {
         Ok(self)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_sakura_moyu_chs_patch_vfs(
+        mut self,
+        nls: Nls,
+        patch_bin_path: impl AsRef<Path>,
+    ) -> anyhow::Result<Self> {
+        self.world.vfs =
+            crate::subsystem::resources::vfs::Vfs::new_with_sakura_moyu_chs_patch(
+                nls,
+                patch_bin_path,
+            )?;
+        Ok(self)
+    }
+
     #[cfg(target_arch = "wasm32")]
     pub fn with_wasm_vfs(mut self, vfs: crate::subsystem::resources::vfs::Vfs) -> Self {
         self.world.vfs = vfs;

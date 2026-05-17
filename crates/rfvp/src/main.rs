@@ -19,14 +19,18 @@ mod exit_confirm_ui;
 
 pub(crate) mod platform_time;
 
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use script::parser::{Nls, Parser};
+use script::string_patch::StringPatchTable;
 use subsystem::{anzu_scene::AnzuScene, resources::thread_manager::ThreadManager};
 
-use anyhow::Result;
-use log::LevelFilter;
-use boot::{app_config, load_script};
 use crate::app::App;
-use crate::utils::file::set_base_path;
+use crate::utils::file::{app_base_path, set_base_path};
+use anyhow::{Context, Result};
+use boot::{app_config, load_script};
+use log::LevelFilter;
 
 
 /// Parse `--project-dir <path>` or `--project-dir=<path>` from argv.
@@ -83,6 +87,34 @@ fn parse_system_font_arg() -> bool {
     std::env::args().skip(1).any(|a| a == "--system-font")
 }
 
+/// Parse `--sakura-moyu-chs-patch`; this explicitly enables the Chinese patch.
+fn parse_sakura_moyu_chs_patch_arg() -> bool {
+    std::env::args()
+        .skip(1)
+        .any(|a| a == "--sakura-moyu-chs-patch")
+}
+
+fn require_sakura_moyu_chs_patch_files() -> Result<(PathBuf, PathBuf)> {
+    let base_path = app_base_path().get_path().clone();
+    let patch_dat_path = base_path.join("patch.dat");
+    let patch_bin_path = base_path.join("patch.bin");
+
+    if !patch_dat_path.is_file() {
+        anyhow::bail!(
+            "--sakura-moyu-chs-patch requires patch.dat under {}",
+            base_path.display()
+        );
+    }
+    if !patch_bin_path.is_file() {
+        anyhow::bail!(
+            "--sakura-moyu-chs-patch requires patch.bin under {}",
+            base_path.display()
+        );
+    }
+
+    Ok((patch_dat_path, patch_bin_path))
+}
+
 // use dhat;
 
 // #[global_allocator]
@@ -96,7 +128,25 @@ fn main() -> Result<()> {
     }
     let nls = parse_nls_arg();
     let system_font = parse_system_font_arg();
-    let parser = load_script(nls)?;
+    let sakura_moyu_chs_patch = parse_sakura_moyu_chs_patch_arg();
+    let patch_paths = if sakura_moyu_chs_patch {
+        Some(require_sakura_moyu_chs_patch_files()?)
+    } else {
+        None
+    };
+    let parser = if let Some((patch_dat_path, _)) = &patch_paths {
+        let string_patch = Arc::new(
+            StringPatchTable::from_path(patch_dat_path)
+                .with_context(|| format!("load {}", patch_dat_path.display()))?,
+        );
+        log::info!(
+            "loaded Sakura Moyu Chinese string patch: {} entries",
+            string_patch.len()
+        );
+        load_script(nls)?.with_string_patch(string_patch)
+    } else {
+        load_script(nls)?
+    };
     let title  = parser.get_title();
     let size = parser.get_screen_size();
     let script_engine = ThreadManager::new();
@@ -106,8 +156,12 @@ fn main() -> Result<()> {
         .with_script_engine(script_engine)
         .with_window_title(&title)
         .with_window_size(size)
-        .with_parser(parser)
-        .with_vfs(nls)?;
+        .with_parser(parser);
+    let app = if let Some((_, patch_bin_path)) = &patch_paths {
+        app.with_sakura_moyu_chs_patch_vfs(nls, patch_bin_path)?
+    } else {
+        app.with_vfs(nls)?
+    };
     let app = if system_font {
         app.with_system_font(true)
     } else {

@@ -308,6 +308,10 @@ impl VfsFile {
             }
         }
 
+        self.open_pack_entry_stream_with_len(name)
+    }
+
+    fn open_pack_entry_stream_with_len(&self, name: &str) -> Result<(VfsStream, Option<u64>)> {
         let ent = self
             .entries
             .get(name)
@@ -369,8 +373,15 @@ impl VfsFile {
 pub struct Vfs {
     pub files: HashMap<String, VfsFile>,
     pub nls: Nls,
+    sakura_moyu_patch: Option<SakuraMoyuPatchOverlay>,
     #[cfg(target_arch = "wasm32")]
     wasm_app_path: Option<WasmAppPath>,
+}
+
+#[derive(Debug)]
+struct SakuraMoyuPatchOverlay {
+    file: VfsFile,
+    overrides: HashMap<String, String>,
 }
 
 impl Default for Vfs {
@@ -380,6 +391,7 @@ impl Default for Vfs {
             return Vfs {
                 files: HashMap::new(),
                 nls: Nls::ShiftJIS,
+                sakura_moyu_patch: None,
                 wasm_app_path: None,
             };
         }
@@ -411,9 +423,35 @@ impl Vfs {
         Ok(Vfs {
             files,
             nls: nls.clone(),
+            sakura_moyu_patch: None,
             #[cfg(target_arch = "wasm32")]
             wasm_app_path: None,
         })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn new_with_sakura_moyu_chs_patch(
+        nls: Nls,
+        patch_bin_path: impl AsRef<Path>,
+    ) -> Result<Vfs> {
+        let mut vfs = Vfs::new(nls)?;
+        vfs.files.remove("patch");
+
+        let patch_file = VfsFile::new(
+            patch_bin_path.as_ref().to_path_buf(),
+            "patch".to_string(),
+            nls,
+        )?;
+        let overrides = build_sakura_moyu_patch_overrides(&vfs.files, &patch_file);
+        log::info!(
+            "loaded Sakura Moyu Chinese patch overlay: {} mapped entries",
+            overrides.len()
+        );
+        vfs.sakura_moyu_patch = Some(SakuraMoyuPatchOverlay {
+            file: patch_file,
+            overrides,
+        });
+        Ok(vfs)
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -440,6 +478,7 @@ impl Vfs {
         Ok(Vfs {
             files,
             nls: nls.clone(),
+            sakura_moyu_patch: None,
             wasm_app_path: Some(app_path),
         })
     }
@@ -477,13 +516,25 @@ impl Vfs {
             }
         }
 
+        self.open_packed_stream_with_len(path)
+    }
+
+    fn open_packed_stream_with_len(&self, path: &str) -> Result<(VfsStream, Option<u64>)> {
         let (folder, inner) = path
             .split_once('/')
             .ok_or_else(|| anyhow::anyhow!("file not found: {}", path))?;
+        let folder_key = folder.to_ascii_lowercase();
+
+        if let Some(patch) = &self.sakura_moyu_patch {
+            let path_key = vfs_path_key(&folder_key, inner);
+            if let Some(patch_entry_name) = patch.overrides.get(&path_key) {
+                return patch.file.open_pack_entry_stream_with_len(patch_entry_name);
+            }
+        }
 
         let vf = self
             .files
-            .get(&folder.to_ascii_lowercase())
+            .get(&folder_key)
             .ok_or_else(|| {
                 #[cfg(target_arch = "wasm32")]
                 {
@@ -525,6 +576,28 @@ impl Vfs {
         Ok(buf)
     }
 
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    fn read_file_at_base(&self, base_path: &Path, path: &str) -> Result<Vec<u8>> {
+        let loose_path = base_path.join(path);
+        let (mut r, byte_len): (VfsStream, Option<u64>) = if loose_path.exists() {
+            let f = File::open(&loose_path)
+                .with_context(|| format!("open file {}", loose_path.display()))?;
+            let len = f.metadata().ok().map(|m| m.len());
+            (Box::new(f), len)
+        } else {
+            self.open_packed_stream_with_len(path)?
+        };
+
+        let mut buf = Vec::with_capacity(
+            byte_len
+                .and_then(|n| usize::try_from(n).ok())
+                .unwrap_or(0),
+        );
+        r.read_to_end(&mut buf)
+            .with_context(|| format!("read all bytes for {}", path))?;
+        Ok(buf)
+    }
+
     pub fn save(&self, path: &str, content: Vec<u8>) -> Result<()> {
         let (folder, name) = path
             .split_once('/')
@@ -553,6 +626,51 @@ impl Vfs {
     }
 }
 
+fn vfs_path_key(folder_key: &str, inner: &str) -> String {
+    format!("{}/{}", folder_key, inner)
+}
+
+fn build_sakura_moyu_patch_overrides(
+    files: &HashMap<String, VfsFile>,
+    patch_file: &VfsFile,
+) -> HashMap<String, String> {
+    let mut overrides = HashMap::new();
+
+    for patch_entry_name in patch_file.entries.keys() {
+        let matches: Vec<&str> = files
+            .iter()
+            .filter(|(folder, file)| {
+                folder.as_str() != "patch" && file.entries.contains_key(patch_entry_name)
+            })
+            .map(|(folder, _)| folder.as_str())
+            .collect();
+
+        match matches.as_slice() {
+            [folder] => {
+                overrides.insert(
+                    vfs_path_key(folder, patch_entry_name),
+                    patch_entry_name.clone(),
+                );
+            }
+            [] => {
+                log::warn!(
+                    "Sakura Moyu Chinese patch entry is unmatched: {}",
+                    patch_entry_name
+                );
+            }
+            folders => {
+                log::warn!(
+                    "Sakura Moyu Chinese patch entry is ambiguous and will not override: {} -> {:?}",
+                    patch_entry_name,
+                    folders
+                );
+            }
+        }
+    }
+
+    overrides
+}
+
 #[cfg(target_arch = "wasm32")]
 fn normalize_vfs_key(path: &str) -> String {
     normalize_wasm_key(path)
@@ -561,10 +679,167 @@ fn normalize_vfs_key(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn test_vfs_parse_pack_smoke() {
         let p = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/testcase"));
         let _ = p;
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "rfvp-vfs-{name}-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn write_pack(path: &Path, entries: &[(&str, &[u8])]) {
+        let file_count = entries.len() as u32;
+        let mut filename_table = Vec::new();
+        let mut name_offsets = Vec::new();
+        for (name, _) in entries {
+            name_offsets.push(filename_table.len() as u32);
+            filename_table.write_all(name.as_bytes()).unwrap();
+            filename_table.write_all(&[0]).unwrap();
+        }
+
+        let mut data_offset = 8 + entries.len() * 12 + filename_table.len();
+        let mut data = Vec::new();
+        let mut entry_table = Vec::new();
+        for ((_, bytes), name_offset) in entries.iter().zip(name_offsets) {
+            entry_table.write_all(&name_offset.to_le_bytes()).unwrap();
+            entry_table
+                .write_all(&(data_offset as u32).to_le_bytes())
+                .unwrap();
+            entry_table
+                .write_all(&(bytes.len() as u32).to_le_bytes())
+                .unwrap();
+            data.write_all(bytes).unwrap();
+            data_offset += bytes.len();
+        }
+
+        let mut out = Vec::new();
+        out.write_all(&file_count.to_le_bytes()).unwrap();
+        out.write_all(&(filename_table.len() as u32).to_le_bytes())
+            .unwrap();
+        out.write_all(&entry_table).unwrap();
+        out.write_all(&filename_table).unwrap();
+        out.write_all(&data).unwrap();
+        fs::write(path, out).unwrap();
+    }
+
+    fn test_vfs(base: &Path) -> Vfs {
+        write_pack(
+            &base.join("graph.bin"),
+            &[
+                ("menu_bg", b"normal-menu".as_slice()),
+                ("plain", b"normal-plain".as_slice()),
+                ("ambiguous", b"graph-ambiguous".as_slice()),
+            ],
+        );
+        write_pack(
+            &base.join("graph_vis.bin"),
+            &[
+                ("title_logo1", b"normal-logo".as_slice()),
+                ("ambiguous", b"graph-vis-ambiguous".as_slice()),
+            ],
+        );
+        write_pack(
+            &base.join("patch.bin"),
+            &[
+                ("menu_bg", b"patched-menu".as_slice()),
+                ("title_logo1", b"patched-logo".as_slice()),
+                ("ambiguous", b"patched-ambiguous".as_slice()),
+                ("unmatched", b"patched-unmatched".as_slice()),
+            ],
+        );
+
+        let mut files = HashMap::new();
+        files.insert(
+            "graph".to_string(),
+            VfsFile::new(base.join("graph.bin"), "graph".to_string(), Nls::UTF8).unwrap(),
+        );
+        files.insert(
+            "graph_vis".to_string(),
+            VfsFile::new(
+                base.join("graph_vis.bin"),
+                "graph_vis".to_string(),
+                Nls::UTF8,
+            )
+            .unwrap(),
+        );
+        let patch_file =
+            VfsFile::new(base.join("patch.bin"), "patch".to_string(), Nls::UTF8).unwrap();
+        let overrides = build_sakura_moyu_patch_overrides(&files, &patch_file);
+
+        Vfs {
+            files,
+            nls: Nls::UTF8,
+            sakura_moyu_patch: Some(SakuraMoyuPatchOverlay {
+                file: patch_file,
+                overrides,
+            }),
+            #[cfg(target_arch = "wasm32")]
+            wasm_app_path: None,
+        }
+    }
+
+    #[test]
+    fn sakura_moyu_patch_overlay_maps_only_unambiguous_pack_entries() {
+        let base = temp_dir("mapping");
+        let vfs = test_vfs(&base);
+        let patch = vfs.sakura_moyu_patch.as_ref().unwrap();
+
+        assert_eq!(
+            patch.overrides.get("graph/menu_bg"),
+            Some(&"menu_bg".to_string())
+        );
+        assert_eq!(
+            patch.overrides.get("graph_vis/title_logo1"),
+            Some(&"title_logo1".to_string())
+        );
+        assert!(!patch.overrides.contains_key("graph/ambiguous"));
+        assert!(!patch.overrides.contains_key("graph_vis/ambiguous"));
+        assert!(!patch.overrides.values().any(|name| name == "unmatched"));
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn sakura_moyu_patch_overlay_resolution_order() {
+        let base = temp_dir("resolution");
+        let vfs = test_vfs(&base);
+
+        fs::create_dir_all(base.join("graph")).unwrap();
+        fs::write(base.join("graph/menu_bg"), b"loose-menu").unwrap();
+        assert_eq!(
+            vfs.read_file_at_base(&base, "graph/menu_bg").unwrap(),
+            b"loose-menu"
+        );
+
+        fs::remove_file(base.join("graph/menu_bg")).unwrap();
+        assert_eq!(
+            vfs.read_file_at_base(&base, "graph/menu_bg").unwrap(),
+            b"patched-menu"
+        );
+        assert_eq!(
+            vfs.read_file_at_base(&base, "graph/plain").unwrap(),
+            b"normal-plain"
+        );
+        assert_eq!(
+            vfs.read_file_at_base(&base, "graph/ambiguous").unwrap(),
+            b"graph-ambiguous"
+        );
+
+        let _ = fs::remove_dir_all(base);
     }
 }
