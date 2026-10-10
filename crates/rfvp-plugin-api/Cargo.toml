@@ -1,0 +1,6 @@
+[package]
+name = "rfvp-plugin-api"
+version = "0.1.0"
+edition = "2021"
+license = "MPL-2.0"
+description = "Portable preparation data for RFVP plugins (unstable)"

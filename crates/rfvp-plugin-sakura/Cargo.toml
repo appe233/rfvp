@@ -1,0 +1,14 @@
+[package]
+name = "rfvp-plugin-sakura"
+version = "0.1.0"
+edition = "2021"
+license = "MPL-2.0"
+description = "Sakura Moyu Chinese patch preparation for RFVP"
+
+[build-dependencies]
+sha2 = "0.10"
+
+[dependencies]
+rfvp-plugin-api = { path = "../rfvp-plugin-api" }
+encoding_rs = { version = "0.8.33", default-features = false, features = ["alloc"] }
+miniz_oxide = { version = "0.7.4", default-features = false, features = ["with-alloc"] }

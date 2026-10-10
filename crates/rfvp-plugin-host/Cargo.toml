@@ -1,0 +1,27 @@
+[package]
+name = "rfvp-plugin-host"
+version = "0.1.0"
+edition = "2021"
+license = "MPL-2.0"
+description = "Desktop RFVP preparation sources and optional Wasmi interpreter"
+
+[features]
+default = []
+wasmi-runtime = ["dep:wasmi"]
+
+[dependencies]
+anyhow = "1"
+rfvp-plugin-sdk = { path = "../rfvp-plugin-sdk" }
+sha2 = "0.10"
+cap-std = "3.4"
+same-file = "1"
+serde = "1"
+serde_json = "1"
+wasmi = { version = "=2.0.0", optional = true, default-features = false, features = ["stable", "std", "validate", "portable-dispatch"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+wat = "1"
+tempfile = "3"

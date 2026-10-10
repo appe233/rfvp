@@ -1,0 +1,14 @@
+[package]
+name = "rfvp-plugin-sakura-guest"
+version = "0.1.0"
+edition = "2021"
+license = "MPL-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+rfvp-plugin-sdk = { path = "../rfvp-plugin-sdk" }
+rfvp-plugin-sakura = { path = "../rfvp-plugin-sakura" }
+rfvp-plugin-api = { path = "../rfvp-plugin-api" }
