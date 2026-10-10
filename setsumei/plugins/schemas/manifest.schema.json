@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rfvp.invalid/plugin/abi-1.0-candidate/manifest.schema.json",
+  "title": "RFVP preparation plugin manifest (ABI 1.0 candidate, plugin.json)",
+  "description": "Structural schema only. The host additionally enforces: file at most 65536 bytes; UTF-8 byte (not code point) lengths; module at most 8 MiB; claimed_archives must be a subset of inputs; claims may not overlap across plugins; the selected script hash must be listed; paths resolve inside their root without escaping symlinks. Not frozen.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "version", "api_major", "api_minor", "capabilities", "module",
+               "supported_scripts", "inputs", "claimed_archives"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "id": {"type": "string", "pattern": "^[a-z0-9._-]{1,128}$"},
+    "version": {"type": "string", "minLength": 1, "maxLength": 64,
+                "description": "Opaque; at most 64 UTF-8 bytes. Compared exactly in save identity."},
+    "api_major": {"const": 1},
+    "api_minor": {"const": 0},
+    "capabilities": {"type": "array", "uniqueItems": true, "maxItems": 2,
+                     "items": {"enum": ["script-string-table-v1", "resource-mapping-v1"]}},
+    "module": {"$ref": "#/$defs/relative_path"},
+    "supported_scripts": {"type": "array", "minItems": 1, "maxItems": 512,
+                          "items": {"$ref": "#/$defs/sha256"}},
+    "inputs": {"type": "array", "uniqueItems": true, "maxItems": 256,
+               "items": {"$ref": "#/$defs/relative_path"}},
+    "claimed_archives": {"type": "array", "uniqueItems": true, "maxItems": 256,
+                         "items": {"$ref": "#/$defs/relative_path"}}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "relative_path": {
+      "type": "string", "minLength": 1, "maxLength": 1024,
+      "description": "'/'-separated; no empty, '.' or '..' component; no NUL, backslash or colon; at most 1024 UTF-8 bytes.",
+      "pattern": "^(?!/)(?!.*//)(?!.*/$)(?!(.*/)?\\.\\.?(/|$))[^\\\\:\\u0000]+$"
+    }
+  }
+}

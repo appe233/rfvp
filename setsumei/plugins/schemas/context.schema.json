@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rfvp.invalid/plugin/abi-1.0-candidate/context.schema.json",
+  "title": "RFVP game context supplied through context_len/context_read (ABI 1.0 candidate)",
+  "description": "Host-produced; at most 8 MiB serialized. Source ids are 1..N in manifest input order. Archive entry lists and originals are sorted by UTF-8 bytes. originals excludes every plugin's claimed archives, loose files, and overrides. Not frozen.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["script_sha256", "code_start", "code_end", "sources", "originals"],
+  "properties": {
+    "script_sha256": {"$ref": "manifest.schema.json#/$defs/sha256"},
+    "code_start": {"$ref": "#/$defs/u32"},
+    "code_end": {"$ref": "#/$defs/u32"},
+    "sources": {"type": "array", "maxItems": 256, "items": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "path", "len", "sha256", "entries"],
+      "properties": {
+        "id": {"type": "integer", "minimum": 1, "maximum": 4294967295},
+        "path": {"$ref": "manifest.schema.json#/$defs/relative_path"},
+        "len": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
+        "sha256": {"$ref": "manifest.schema.json#/$defs/sha256"},
+        "entries": {"type": "array", "maxItems": 100000, "items": {"type": "string"},
+                    "description": "Decoded archive entry names for claimed archives; empty for other inputs."}
+      }}},
+    "originals": {"type": "array", "maxItems": 100000, "items": {
+      "type": "object", "additionalProperties": false, "required": ["path", "entry"],
+      "properties": {"path": {"type": "string"}, "entry": {"type": "string"}}}}
+  },
+  "$defs": {"u32": {"type": "integer", "minimum": 0, "maximum": 4294967295}}
+}

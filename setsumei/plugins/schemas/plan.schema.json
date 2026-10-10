@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rfvp.invalid/plugin/abi-1.0-candidate/plan.schema.json",
+  "title": "RFVP preparation plan submitted once through submit (ABI 1.0 candidate)",
+  "description": "At most 16 MiB. The host additionally enforces: offsets within [code_start, code_end) and unique; text at most 65536 UTF-8 bytes; a capability for each nonempty array; source_id names a claimed archive of this plugin and entry exists in it; resource path has a nonempty folder and entry and is unique after ASCII-lowercasing only the folder. Not frozen.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["strings", "resources"],
+  "properties": {
+    "strings": {"type": "array", "maxItems": 100000, "items": {
+      "type": "object", "additionalProperties": false, "required": ["offset", "text"],
+      "properties": {
+        "offset": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+        "text": {"type": "string", "maxLength": 65536, "pattern": "^[^\\u0000]*$"}}}},
+    "resources": {"type": "array", "maxItems": 100000, "items": {
+      "type": "object", "additionalProperties": false, "required": ["path", "source_id", "entry"],
+      "properties": {
+        "path": {"allOf": [{"$ref": "manifest.schema.json#/$defs/relative_path"}, {"pattern": "/"}]},
+        "source_id": {"type": "integer", "minimum": 1, "maximum": 4294967295},
+        "entry": {"type": "string"}}}}
+  }
+}
