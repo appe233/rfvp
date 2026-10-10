@@ -1,0 +1,103 @@
+name: Plugin validation
+
+# Desktop plugin-host validation on Windows (RFC 001, Change 5). Builds the
+# GPU CLI, library and software-desktop profiles with the plugin features, runs
+# the focused plugin/preparation/save tests, and runs the synthetic fixed-host
+# conformance suite. No game data is used.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feat/plugin-data
+  pull_request:
+    paths:
+      - "crates/rfvp/**"
+      - "crates/rfvp-plugin-*/**"
+      - "tools/plugin-conformance/**"
+      - "setsumei/plugins/schemas/**"
+      - ".github/workflows/plugin-validation.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-A static_mut_refs"
+
+jobs:
+  windows:
+    name: windows (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: windows-2022
+          - arch: aarch64
+            runner: windows-11-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: plugin-validation-${{ matrix.arch }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Environment
+        shell: bash
+        run: |
+          rustc -vV
+          cargo -V
+          python --version
+          echo "runner arch: $RUNNER_ARCH"
+
+      - name: Build GPU CLI with plugin features
+        run: cargo build --locked --release -p rfvp --bin rfvp --features sakura-moyu,external-plugins
+
+      - name: Check GPU desktop library (pump/entry FFI)
+        run: cargo check --locked -p rfvp --lib --features sakura-moyu,external-plugins
+
+      - name: Check software desktop host
+        run: cargo check --locked -p rfvp --no-default-features --features soft-render-desktop,sakura-moyu,external-plugins --bins --lib
+
+      - name: Plugin crate tests
+        run: cargo test --locked -p rfvp-plugin-host --features wasmi-runtime -p rfvp-plugin-sdk -p rfvp-plugin-api -p rfvp-plugin-sakura
+
+      # test_read_save_item needs a local fixture that is absent on every platform.
+      - name: Preparation and save tests (software core)
+        run: cargo test --locked -p rfvp --lib --no-default-features --features soft-render-core,no-audio,sakura-moyu,external-plugins -- preparation save --skip test_read_save_item
+
+      - name: Preparation, save and FFI options tests (GPU render)
+        run: cargo test --locked -p rfvp --lib --no-default-features --features gpu-render,no-audio,sakura-moyu,external-plugins -- preparation save desktop_options_ffi --skip test_read_save_item
+
+      - name: Software launch-option tests
+        run: cargo test --locked -p rfvp --lib --no-default-features --features soft-render-desktop,sakura-moyu,external-plugins -- software_launch
+
+      - name: Synthetic fixed-host conformance
+        run: python tools/plugin-conformance/run.py
+
+      - name: Schema check
+        run: |
+          python -m pip install --quiet jsonschema
+          python tools/plugin-conformance/check_schemas.py
+
+      - name: Upload conformance results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-conformance-windows-${{ matrix.arch }}
+          path: |
+            target/plugin-conformance/results.json
+            target/plugin-conformance/*/plugin.json
+          if-no-files-found: warn
