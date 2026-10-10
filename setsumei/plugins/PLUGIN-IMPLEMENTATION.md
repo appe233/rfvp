@@ -87,7 +87,7 @@ Completion: failed preflight leaves the live session unchanged; known profiles a
 
 **Change 5: validation and ABI publication**
 
-- [ ] Run Windows, Linux, and macOS desktop builds and external-package smoke tests; record which architectures were actually tested. macOS arm64 and Linux arm64/x86_64 (containers, x86_64 under Rosetta) pass. Windows is untested.
+- [ ] Run Windows, Linux, and macOS desktop builds and external-package smoke tests; record which architectures were actually tested. macOS arm64 and Linux arm64/x86_64 (containers, x86_64 under Rosetta) pass. Windows x86_64 and ARM64 pass builds, tests, and synthetic conformance in CI (`plugin-validation.yml`). Windows real-data and gameplay are untested.
 - [ ] Validate GPU CLI, library/pump, and software desktop paths independently. All three build, and their option and preparation tests pass on macOS and Linux. Only the GPU CLI has been verified in game with real data.
 - [x] Run `cargo fmt --all`, focused plugin tests, `cargo test --workspace`, and `cargo clippy --workspace --all-targets`; identify pre-existing failures separately. The focused tests and plugin clippy pass. Workspace test and clippy are blocked by the same pre-existing console-dependency and decoder failures, and the core library has 8 fixture failures.
 - [x] Check `no_std`, `no_std,old_school`, software desktop, and plugins-disabled dependency profiles. After the fast-forward to `f0055c3`, upstream's CI `no_std` check passes. Wasmi appears only with `external-plugins`.
@@ -98,7 +98,7 @@ Completion: failed preflight leaves the live session unchanged; known profiles a
 
 Changes 1–4 and Change 3's real-data gates are complete; see [Change 5 results](CHANGE-5-RESULTS.md); the branch is now based on upstream `f0055c3`. These remain open:
 
-- Windows validation;
+- Windows real-data and gameplay validation;
 - real-data presentation on the library/pump and software paths;
 - reviews of the 2.29 MiB backend size and the 19 s worst-case fuel exhaustion;
 - publication.

@@ -170,7 +170,26 @@ Linux evidence comes from `tools/plugin-platform/linux-docker.sh`. Every contain
 
 The real-data runner gives each probe its own target directory. A shared directory was observed to link the current `rfvp` into the reference-branch probe after an incremental rebuild in the container.
 
-Windows: not tested. It needs a Windows host to build and run the conformance and real-data runners.
+Windows: validated in CI by `.github/workflows/plugin-validation.yml` on the fork (`appe233/rfvp`, run 38038795118, commit `bb407c2`). Both runners passed:
+
+- `windows-2022`: Windows Server 2022, x86_64-pc-windows-msvc.
+- `windows-11-arm`: Windows 11 ARM64, aarch64-pc-windows-msvc, running natively.
+
+| Check (each runner) | Result |
+| --- | --- |
+| GPU CLI release build with `sakura-moyu,external-plugins` | Pass |
+| GPU library check (pump/entry FFI) | Pass |
+| Software desktop bins and library check | Pass |
+| Plugin crate tests | 2 API, 3 SDK, 5 Sakura, 15 host plus 1 ignored. The two Unix-only symlink tests are compiled out |
+| Preparation and save tests, software core | 31 pass. The Unix symlink-alias test is compiled out |
+| GPU-render preparation, save, and FFI options tests | 32 pass |
+| Software launch-option test | Pass |
+| Synthetic fixed-host conformance (6 runs) | Pass. Strings, addresses (6), cursors (9), and mapped resources match; the alternate guest changes output without rebuilding the host |
+| Schema check (26 checks) | Pass |
+
+The first CI run failed only in conformance. On Windows, Python decoded the probe's UTF-8 JSON with the ANSI code page. The tools now use UTF-8 explicitly. The repository's general "Build Artifacts" workflow also passed its default Windows x64 and arm64 builds on this branch; it also passed Linux, macOS, iOS, FreeBSD, wasm, UEFI, and `no_std`. Only Android APK signing failed, because the fork lacks the signing secrets; upstream main passes that step.
+
+Not covered on Windows: authorized real-data equivalence and gameplay, because CI has no game data and no person playing.
 
 Other profiles on macOS:
 
@@ -201,7 +220,7 @@ Notes:
 
 ## Remaining gates
 
-- Windows build and execution.
+- Windows real-data equivalence and gameplay (CI covers builds, tests, and synthetic conformance).
 - Presentation checks for the library/pump and software paths with real data.
 - Reproducible guest builds, if they become a release requirement.
 - Review of the 2.29 MiB backend size and the 19 s worst-case fuel exhaustion.
