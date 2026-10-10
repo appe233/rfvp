@@ -124,9 +124,28 @@ impl Font {
         })
     }
 
-    /// Return whether the font has a real cmap entry for this character.
+    /// Return whether this face can draw the character: it needs a cmap entry
+    /// and, except for whitespace and control characters, a non-empty outline.
+    /// Some bundled faces (e.g. the embedded MS Gothic) map characters such as
+    /// U+517B to empty glyphs. Treating those as present suppressed fallback and
+    /// drew blanks.
     pub fn has_glyph(&self, ch: char) -> bool {
-        self.inner.glyph_id(ch).0 != 0
+        let id = self.inner.glyph_id(ch);
+        id.0 != 0 && (ch.is_whitespace() || ch.is_control() || self.inner.outline(id).is_some())
+    }
+
+    /// Em-square size per unit of `PxScale`.
+    ///
+    /// `PxScale` maps a face's ascent-minus-descent height to pixels, so faces
+    /// whose height differs from their em square draw ideographs at different
+    /// sizes for the same scale (MS Gothic: 1.00 em; Source Han/Noto CJK: about
+    /// 1.45 em). Fallback text uses this ratio to match the primary face.
+    pub fn em_per_scale(&self) -> f32 {
+        let height = self.inner.height_unscaled();
+        match self.inner.units_per_em() {
+            Some(units) if units > 0.0 && height > 0.0 => units / height,
+            _ => 1.0,
+        }
     }
 
     /// Glyph metrics without rasterizing.
@@ -243,6 +262,11 @@ impl Font {
 
     pub fn has_glyph(&self, ch: char) -> bool {
         self.bitmap.lookup_glyph(ch as u32).data.len() == Self::GLYPH_BYTES
+    }
+
+    /// Bitmap faces use a fixed cell; there is no separate em square.
+    pub fn em_per_scale(&self) -> f32 {
+        1.0
     }
 
     pub fn metrics(&self, ch: char, size: f32) -> Metrics {

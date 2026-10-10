@@ -341,7 +341,22 @@ impl FontFallbackSet {
         &self.primary
     }
 
-    fn for_char(&self, ch: char) -> &Font {
+    fn for_char(&self, ch: char, size: f32) -> (&Font, f32) {
+        let font = self.face_for_char(ch);
+        if core::ptr::eq(font, &self.primary) {
+            return (font, size);
+        }
+        // A substituted glyph is drawn at the primary face's em size, the way GDI
+        // font linking keeps linked glyphs at the requested height. Without this,
+        // ideographs from faces taller than their em square (Source Han, Noto CJK,
+        // Songti) came out at about 70% of their neighbors' size.
+        (
+            font,
+            fallback_glyph_size(size, self.primary.em_per_scale(), font.em_per_scale()),
+        )
+    }
+
+    fn face_for_char(&self, ch: char) -> &Font {
         // The original engine selects one HFONT for the text style and asks GDI
         // to rasterize every glyph with that face. Therefore the selected primary
         // face must win whenever it actually contains the glyph. A packaged CJK
@@ -362,6 +377,18 @@ impl FontFallbackSet {
             .iter()
             .find(|font| font.has_glyph(ch))
             .unwrap_or(&self.primary)
+    }
+}
+
+/// `PxScale` for a fallback face so its em square matches the primary face's.
+/// Faces whose em-per-scale ratio is within 1% of the primary's keep the
+/// historical size exactly.
+fn fallback_glyph_size(size: f32, primary_em_per_scale: f32, face_em_per_scale: f32) -> f32 {
+    let factor = primary_em_per_scale / face_em_per_scale;
+    if !factor.is_finite() || (factor - 1.0).abs() <= 0.01 {
+        size
+    } else {
+        size * factor
     }
 }
 
@@ -457,34 +484,49 @@ fn normalized_font_file_name(path: &Path) -> String {
         .collect()
 }
 
+/// System CJK fallback faces in priority order. Gothic (sans-serif) faces come
+/// first because the engine's default face is MS Gothic; mixing a Mincho/Song
+/// face into Gothic text looks inconsistent. The order is deterministic rather
+/// than filesystem-dependent, so the same machine always picks the same faces.
 #[cfg(not(feature = "no_std"))]
-fn is_cjk_fallback_font_candidate(path: &Path) -> bool {
+const CJK_FALLBACK_FONT_PRIORITY: &[&str] = &[
+    // Sans-serif / Gothic
+    "msyh",
+    "microsoftyahei",
+    "simhei",
+    "deng",
+    "pingfang",
+    "heiti",
+    "hiraginosansgb",
+    "notosanssc",
+    "notosanscjk",
+    "sourcehansans",
+    "msjh",
+    "droidsansfallback",
+    // Serif / Song / Mincho
+    "simsun",
+    "songti",
+    "notoserifsc",
+    "notoserifcjk",
+    "sourcehanserif",
+    "mingliu",
+];
+
+/// Priority of a system CJK fallback candidate (lower loads first), or `None`
+/// if it is not one.
+#[cfg(not(feature = "no_std"))]
+fn cjk_fallback_font_priority(path: &Path) -> Option<usize> {
     if !is_font_file(path) {
-        return false;
+        return None;
     }
     let name = normalized_font_file_name(path);
-    [
-        "simsun",
-        "simhei",
-        "msyh",
-        "microsoftyahei",
-        "deng",
-        "mingliu",
-        "msjh",
-        "pingfang",
-        "songti",
-        "heiti",
-        "hiraginosansgb",
-        "notosanscjk",
-        "notoserifcjk",
-        "notosanssc",
-        "notoserifsc",
-        "sourcehansans",
-        "sourcehanserif",
-        "droidsansfallback",
-    ]
-    .iter()
-    .any(|needle| name.contains(needle))
+    let family = CJK_FALLBACK_FONT_PRIORITY
+        .iter()
+        .position(|needle| name.contains(needle))?;
+    // Within a family, prefer regular/medium weights over light/thin files
+    // (e.g. "STHeiti Medium" before "STHeiti Light") to match MS Gothic.
+    let light = ["light", "thin", "w3"].iter().any(|w| name.contains(w));
+    Some(family * 2 + usize::from(light))
 }
 
 #[cfg(all(not(feature = "no_std"), not(target_arch = "wasm32")))]
@@ -879,42 +921,51 @@ impl FontEnumerator {
         self.system_fallback_scan_done = true;
 
         const MAX_SYSTEM_FALLBACK_FONTS: usize = 12;
+        // Bound the directory walk; font directories are normally far smaller.
+        const MAX_SCANNED_ENTRIES: usize = 50_000;
         let mut stack = system_font_dirs();
-        let mut loaded_count = 0usize;
+        let mut candidates = Vec::new();
+        let mut scanned = 0usize;
 
-        while let Some(dir) = stack.pop() {
-            if loaded_count >= MAX_SYSTEM_FALLBACK_FONTS || !dir.exists() {
-                continue;
-            }
+        // Collect every candidate first, then load in priority order, so the
+        // chosen faces do not depend on directory iteration order.
+        'walk: while let Some(dir) = stack.pop() {
             let Ok(entries) = fs::read_dir(&dir) else {
                 continue;
             };
             for entry in entries.flatten() {
-                if loaded_count >= MAX_SYSTEM_FALLBACK_FONTS {
-                    break;
+                scanned += 1;
+                if scanned > MAX_SCANNED_ENTRIES {
+                    break 'walk;
                 }
                 let p = entry.path();
                 if p.is_dir() {
                     stack.push(p);
-                    continue;
+                } else if let Some(priority) = cjk_fallback_font_priority(&p) {
+                    candidates.push((priority, p));
                 }
-                if !is_cjk_fallback_font_candidate(&p) {
-                    continue;
+            }
+        }
+        candidates.sort();
+
+        let mut loaded_count = 0usize;
+        for (_, p) in candidates {
+            if loaded_count >= MAX_SYSTEM_FALLBACK_FONTS {
+                break;
+            }
+            match load_font_file(&p) {
+                Ok(Some(loaded)) => {
+                    log::info!(
+                        "Loaded hidden system CJK fallback font '{}' from {}",
+                        loaded.name,
+                        p.display()
+                    );
+                    self.system_fallback_fonts.push(loaded);
+                    loaded_count += 1;
                 }
-                match load_font_file(&p) {
-                    Ok(Some(loaded)) => {
-                        log::info!(
-                            "Loaded hidden system CJK fallback font '{}' from {}",
-                            loaded.name,
-                            p.display()
-                        );
-                        self.system_fallback_fonts.push(loaded);
-                        loaded_count += 1;
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        log::warn!("System font fallback skipped for {}: {}", p.display(), e);
-                    }
+                Ok(None) => {}
+                Err(e) => {
+                    log::warn!("System font fallback skipped for {}: {}", p.display(), e);
                 }
             }
         }
@@ -1733,9 +1784,18 @@ impl TextItem {
         // The original GDI path copies each glyph into a fixed-height character
         // cell whose top is TextObj::y (plus the ruby block for main text).
         // Our fallback renderer can select a different face per character, so the
-        // baseline must come from the face that will actually rasterize this glyph.
+        // baseline comes from the face that rasterizes this glyph. The exception
+        // is a fallback face rescaled to the primary em size (see
+        // `FontFallbackSet::for_char`): its own ascent at that size would drop the
+        // glyph (Source Han: 1.16 em), so it shares the primary face's baseline,
+        // as GDI font linking does.
         let eff_size = Self::effective_gdi_font_size(size, outline, shadow_dist);
-        let font = fonts.for_char(ch);
+        let (font, glyph_size) = fonts.for_char(ch, eff_size);
+        let font = if glyph_size != eff_size {
+            fonts.primary()
+        } else {
+            font
+        };
         let ascent = font
             .horizontal_line_metrics(eff_size)
             .map(|m| m.ascent.ceil() as i32)
@@ -1755,8 +1815,8 @@ impl TextItem {
     ) -> i32 {
         let extra = Self::layout_extra_advance_px(outline, distance);
         let eff_size = Self::effective_gdi_font_size(size, outline, distance);
-        let font = fonts.for_char(ch);
-        let (metrics, _) = font.rasterize(ch, eff_size);
+        let (font, glyph_size) = fonts.for_char(ch, eff_size);
+        let (metrics, _) = font.rasterize(ch, glyph_size);
         metrics.advance_width.ceil() as i32 + extra
     }
 
@@ -2155,8 +2215,8 @@ impl TextItem {
         shadow_dist: u8,
     ) -> RectI32 {
         let eff_size = Self::effective_gdi_font_size(size, outline, shadow_dist);
-        let font = fonts.for_char(ch);
-        let (metrics, _) = font.rasterize(ch, eff_size);
+        let (font, glyph_size) = fonts.for_char(ch, eff_size);
+        let (metrics, _) = font.rasterize(ch, glyph_size);
         let gx = x + metrics.xmin;
         let gy = y - (metrics.ymin + metrics.height as i32);
         Self::glyph_bounds(
@@ -2286,8 +2346,8 @@ impl TextItem {
         do_draw: bool,
     ) -> i32 {
         let eff_size = Self::effective_gdi_font_size(size, outline, shadow_dist);
-        let font = fonts.for_char(ch);
-        let (metrics, bitmap) = font.rasterize(ch, eff_size);
+        let (font, glyph_size) = fonts.for_char(ch, eff_size);
+        let (metrics, bitmap) = font.rasterize(ch, glyph_size);
         let gx = x + metrics.xmin;
         let gy = y - (metrics.ymin + metrics.height as i32);
 
@@ -3965,5 +4025,109 @@ mod font_enumerator_tests {
         assert_eq!(fonts.forced_font_id(), None);
 
         assert_eq!(fonts.add_font_file(&dir.join("missing.ttf")), None);
+    }
+}
+
+#[cfg(all(test, not(feature = "no_std"), not(feature = "old_school")))]
+mod font_fallback_tests {
+    use super::*;
+
+    fn embedded(bytes: &'static [u8]) -> Font {
+        Font::from_static(bytes).unwrap()
+    }
+
+    fn ink_height(font: &Font, ch: char, size: f32) -> usize {
+        font.rasterize(ch, size).0.height
+    }
+
+    #[test]
+    fn empty_glyphs_in_the_primary_face_fall_back() {
+        let gothic = embedded(include_bytes!("./fonts/MSGOTHIC.TTF"));
+        let pgothic = embedded(include_bytes!("./fonts/MS-PGothic.ttf"));
+        // The embedded MS Gothic maps U+517B to a glyph without an outline.
+        assert!(!gothic.has_glyph('养'));
+        assert!(gothic.has_glyph('我'));
+        assert!(gothic.has_glyph(' '));
+        assert!(pgothic.has_glyph('养'));
+
+        let set = FontFallbackSet::new(gothic.clone(), Vec::new(), vec![pgothic]);
+        let (font, size) = set.for_char('我', 24.0);
+        assert!(core::ptr::eq(font, set.primary()));
+        assert_eq!(size, 24.0);
+        let (font, size) = set.for_char('养', 24.0);
+        assert!(!core::ptr::eq(font, set.primary()));
+        // Both MS faces have em-per-scale within 1%: no rescaling.
+        assert_eq!(size, 24.0);
+        assert!(ink_height(font, '养', size) > 0);
+        // Without any face that can draw it, the primary is still returned.
+        let alone = FontFallbackSet::new(gothic, Vec::new(), Vec::new());
+        assert!(core::ptr::eq(alone.for_char('养', 24.0).0, alone.primary()));
+    }
+
+    #[test]
+    fn fallback_size_matches_the_primary_em_square() {
+        // MS Gothic (255/256 units per em) primary with a Source Han-like face
+        // whose ascent-descent spans 1.448 em.
+        let size = fallback_glyph_size(24.0, 256.0 / 255.0, 1.0 / 1.448);
+        assert!((size - 24.0 * 1.448 * 256.0 / 255.0).abs() < 1e-3, "{size}");
+        assert_eq!(fallback_glyph_size(24.0, 256.0 / 255.0, 1.0), 24.0);
+        assert_eq!(fallback_glyph_size(24.0, 1.0, 0.0), 24.0);
+    }
+
+    /// Render a line through the real text slot path with the host's CJK
+    /// fallback fonts and dump `width height` + raw RGBA for visual inspection.
+    #[test]
+    #[ignore = "needs installed CJK fonts; writes RFVP_TEXT_RENDER_OUT"]
+    fn render_line_with_system_fallback_fonts() {
+        let out = std::env::var("RFVP_TEXT_RENDER_OUT").expect("RFVP_TEXT_RENDER_OUT");
+        let text = std::env::var("RFVP_TEXT_RENDER_TEXT").unwrap_or_else(|_| {
+            "\u{3010}\u{6211}\u{517B}\u{517D}\u{4E1C}\u{5173}\u{554A}\u{3011}".into()
+        });
+        let mut fonts = FontEnumerator::new();
+        fonts.set_system_font_fallback_enabled(
+            std::env::var_os("RFVP_TEXT_RENDER_NO_SYSTEM").is_none(),
+        );
+        fonts.init_fontface().unwrap();
+        let gaiji = GaijiManager::new();
+        let mut manager = TextManager::new();
+        manager.set_text_buff(0, 1200, 64);
+        manager.set_text_color1(0, &ColorItem::white());
+        manager.set_text_size1(0, 32);
+        manager.set_text_speed(0, 0);
+        manager.set_text_content(0, &text);
+        let Some(TextSlotSurfaceUpdate::Pixels(info)) = manager
+            .rasterize_slot_if_needed(0, &fonts, &gaiji, true)
+            .unwrap()
+        else {
+            panic!("text slot produced no pixels");
+        };
+        let (w, h) = (info.width, info.height);
+        let rgba = manager.slot_rgba_bytes(0).expect("rendered text");
+        let mut bytes = format!("{w} {h}\n").into_bytes();
+        bytes.extend_from_slice(rgba);
+        std::fs::write(out, bytes).unwrap();
+    }
+
+    /// Manual check with an installed CJK face, e.g.
+    /// `RFVP_TEST_CJK_FONT=/System/Library/Fonts/Supplemental/Songti.ttc`.
+    #[test]
+    #[ignore = "needs RFVP_TEST_CJK_FONT pointing to an installed CJK font"]
+    fn installed_cjk_fallback_matches_primary_glyph_height() {
+        let path = std::env::var("RFVP_TEST_CJK_FONT").expect("RFVP_TEST_CJK_FONT");
+        let gothic = embedded(include_bytes!("./fonts/MSGOTHIC.TTF"));
+        let face = Font::from_vec(std::fs::read(&path).unwrap()).unwrap();
+        let set = FontFallbackSet::new(gothic, Vec::new(), vec![face]);
+        let size = 48.0;
+        let reference = ink_height(set.primary(), '我', size) as f32;
+        for ch in ['东', '养', '关'] {
+            let (font, glyph_size) = set.for_char(ch, size);
+            assert!(!core::ptr::eq(font, set.primary()), "{ch} must fall back");
+            let height = ink_height(font, ch, glyph_size) as f32;
+            eprintln!("{ch}: scale {glyph_size:.1}, ink {height} px vs primary {reference} px");
+            assert!(
+                (height / reference - 1.0).abs() < 0.15,
+                "{ch}: {height} vs {reference}"
+            );
+        }
     }
 }
