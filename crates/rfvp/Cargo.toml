@@ -29,7 +29,13 @@ name = "sizecheck"
 path = "src/bin/sizecheck.rs"
 required-features = ["gpu-render"]
 
+[[example]]
+name = "plugin_prepare_probe"
+required-features = ["desktop-preparation"]
+
 [dependencies]
+rfvp-plugin-api = { path = "../rfvp-plugin-api" }
+rfvp-plugin-sakura = { path = "../rfvp-plugin-sakura", optional = true }
 anyhow = { version = "1.0.79", default-features = false, optional = true }
 encoding_rs = { version = "0.8.33", optional = true }
 log = { version = "0.4.20", optional = true }
@@ -100,6 +106,12 @@ uefi = { version = "0.37.0", default-features = false, features = ["alloc"], opt
 anzu-hal = { path = "../anzu-hal", optional = true }
 
 [features]
+# Bundled migration adapter; external packages use external-plugins independently.
+sakura-moyu = ["dep:rfvp-plugin-sakura", "desktop-preparation"]
+# Shared desktop launch preparation; no interpreter or rendering dependencies.
+desktop-preparation = ["dep:sha2", "dep:rfvp-plugin-host"]
+# Explicit desktop-only external package interpreter.
+external-plugins = ["desktop-preparation", "rfvp-plugin-host/wasmi-runtime"]
 # Keep native movie support enabled by default for backward compatibility.
 default = ["runtime-core-deps", "gpu-render", "audio", "mp4", "native-video", "random", "uuid-support", "image-formats", "bevy-utils", "fontdue-compat", "cursor-ani", "zlib-flate2", "logging"]
 
@@ -179,7 +191,7 @@ runtime-core-deps = [
 ]
 
 # Existing wgpu renderer. Enabled by default for backward compatibility.
-gpu-render = ["runtime-core-deps", "dep:clap", "dep:winit", "dep:wgpu", "dep:egui", "dep:egui-wgpu", "dep:android-activity", "dep:ndk-context", "random", "cursor-ani", "zlib-flate2", "logging"]
+gpu-render = ["desktop-preparation", "runtime-core-deps", "dep:clap", "dep:winit", "dep:wgpu", "dep:egui", "dep:egui-wgpu", "dep:android-activity", "dep:ndk-context", "random", "cursor-ani", "zlib-flate2", "logging"]
 
 # CPU/software rendering backend core. This is platform-independent and is used
 # by both desktop software rendering and rfvp-os/UEFI-style builds.
@@ -191,7 +203,7 @@ soft-render = ["soft-render-desktop"]
 
 # Desktop host for the CPU/software renderer. This is intentionally separate
 # from `soft-render-core` so OS/UEFI-style builds do not pull windowing crates.
-soft-render-desktop = ["runtime-core-deps", "soft-render-core", "audio", "native-video", "image-formats", "cursor-ani", "zlib-flate2", "dep:winit", "dep:softbuffer", "logging"]
+soft-render-desktop = ["desktop-preparation", "runtime-core-deps", "soft-render-core", "audio", "native-video", "image-formats", "cursor-ani", "zlib-flate2", "dep:winit", "dep:softbuffer", "logging"]
 
 
 # Desktop/normal logger implementation. Disabled for rfvp-os/UEFI so fern/colored/is-terminal are not pulled into UEFI builds.
@@ -325,7 +337,12 @@ android-activity = { version = "0.6", features = ["game-activity"], optional = t
 ndk-context = { version = "0.1.1", optional = true }
 
 [target.'cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))'.dependencies]
+sha2 = { version = "0.10", optional = true }
+rfvp-plugin-host = { path = "../rfvp-plugin-host", optional = true }
 egui-wgpu = { version = "0.27.2", optional = true }
+
+[dev-dependencies]
+wat = "1"
 
 [profile.test]
 inherits = "release"

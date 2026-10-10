@@ -29,6 +29,27 @@ pub fn app_config(title: &str, size: (u32, u32)) -> AppConfig {
         .get()
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+pub fn prepare_app(
+    root: &std::path::Path,
+    nls: Nls,
+    options: &crate::preparation::LaunchOptions,
+) -> Result<crate::app::AppBuilder> {
+    let prepared = crate::preparation::prepare_game(
+        root,
+        nls,
+        crate::preparation::ScriptDiscovery::PreferBch,
+        options,
+    )?;
+    let title = prepared.parser.get_title();
+    let size = prepared.parser.get_screen_size();
+    Ok(App::app_with_prepared(app_config(&title, size), prepared)?
+        .with_scene::<AnzuScene>()
+        .with_script_engine(ThreadManager::new())
+        .with_window_title(&title)
+        .with_window_size(size))
+}
+
 pub fn load_script(nls: Nls) -> Result<Parser> {
     let base_path = app_base_path();
     let opcode_path = App::find_hcb(base_path.get_path())?;

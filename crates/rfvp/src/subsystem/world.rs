@@ -135,6 +135,12 @@ pub trait World {
 
 pub struct GameData {
     pub(crate) vfs: Vfs,
+    #[cfg(all(
+        feature = "desktop-preparation",
+        not(feature = "no_std"),
+        any(target_os = "macos", target_os = "windows", target_os = "linux")
+    ))]
+    pub(crate) plugin_session: Option<crate::preparation::PluginSession>,
     pub(crate) thread_wrapper: ThreadWrapper,
     pub(crate) history_manager: HistoryManager,
     pub(crate) flag_manager: FlagManager,
@@ -184,6 +190,14 @@ impl GameData {
     /// # Safety
     /// `dst` must point to valid, writable, properly-aligned memory for a `GameData`.
     pub unsafe fn init_default_in_place(dst: *mut GameData) {
+        Self::init_with_vfs_in_place(dst, Vfs::default());
+    }
+
+    /// Initialize using an already prepared VFS, without scanning default archives.
+    ///
+    /// # Safety
+    /// `dst` must point to valid, writable, properly-aligned memory for a `GameData`.
+    pub unsafe fn init_with_vfs_in_place(dst: *mut GameData, vfs: Vfs) {
         use std::ptr;
 
         uefi_game_data_stage!("[UEFI] GameData init before AudioManager");
@@ -191,7 +205,13 @@ impl GameData {
         uefi_game_data_stage!("[UEFI] GameData init after AudioManager");
 
         uefi_game_data_stage!("[UEFI] GameData init before vfs");
-        ptr::addr_of_mut!((*dst).vfs).write(Vfs::default());
+        ptr::addr_of_mut!((*dst).vfs).write(vfs);
+        #[cfg(all(
+            feature = "desktop-preparation",
+            not(feature = "no_std"),
+            any(target_os = "macos", target_os = "windows", target_os = "linux")
+        ))]
+        ptr::addr_of_mut!((*dst).plugin_session).write(None);
         uefi_game_data_stage!("[UEFI] GameData init after vfs");
         uefi_game_data_stage!("[UEFI] GameData init before thread_wrapper");
         ptr::addr_of_mut!((*dst).thread_wrapper).write(ThreadWrapper::default());
@@ -258,6 +278,12 @@ impl Default for GameData {
 
         Self {
             vfs: Vfs::default(),
+            #[cfg(all(
+                feature = "desktop-preparation",
+                not(feature = "no_std"),
+                any(target_os = "macos", target_os = "windows", target_os = "linux")
+            ))]
+            plugin_session: None,
             thread_wrapper: ThreadWrapper::default(),
             history_manager: HistoryManager::default(),
             flag_manager: FlagManager::default(),
@@ -300,6 +326,16 @@ impl Default for GameData {
 }
 
 impl GameData {
+    /// Construct on the heap without a large stack temporary or another VFS scan.
+    #[cfg(not(feature = "no_std"))]
+    pub fn boxed_with_vfs(vfs: Vfs) -> Box<Self> {
+        let mut boxed = Box::<Self>::new_uninit();
+        unsafe {
+            Self::init_with_vfs_in_place(boxed.as_mut_ptr(), vfs);
+            boxed.assume_init()
+        }
+    }
+
     /// retrieves the timers resource from the resources.
     pub fn time_ref(&self) -> &Time {
         &self.time

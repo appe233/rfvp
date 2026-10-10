@@ -21,6 +21,19 @@ mod exit_confirm_ui;
 mod font;
 #[cfg(all(not(feature = "no_std"), feature = "gpu-render"))]
 mod legacy_save_load_ui;
+#[cfg(all(
+    not(feature = "no_std"),
+    feature = "gpu-render",
+    feature = "sakura-moyu",
+    any(target_os = "macos", target_os = "windows", target_os = "linux")
+))]
+mod plugins;
+#[cfg(all(
+    not(feature = "no_std"),
+    feature = "gpu-render",
+    any(target_os = "macos", target_os = "windows", target_os = "linux")
+))]
+mod preparation;
 #[cfg(all(not(feature = "no_std"), feature = "gpu-render"))]
 mod rendering;
 #[cfg(all(not(feature = "no_std"), feature = "gpu-render"))]
@@ -49,18 +62,9 @@ pub(crate) mod platform_time;
 
 #[cfg(all(not(feature = "no_std"), feature = "gpu-render"))]
 use script::parser::Nls;
-#[cfg(all(not(feature = "no_std"), feature = "gpu-render"))]
-use subsystem::{anzu_scene::AnzuScene, resources::thread_manager::ThreadManager};
 
-#[cfg(all(not(feature = "no_std"), feature = "gpu-render"))]
-use crate::app::App;
-#[cfg(all(not(feature = "no_std"), feature = "gpu-render"))]
-use crate::utils::file::set_base_path;
 #[cfg(all(not(feature = "no_std"), feature = "gpu-render"))]
 use anyhow::Result;
-#[cfg(all(not(feature = "no_std"), feature = "gpu-render"))]
-use boot::{app_config, load_script};
-
 #[cfg(all(not(feature = "no_std"), feature = "gpu-render"))]
 use clap::Parser;
 
@@ -88,6 +92,14 @@ struct CliArgs {
     /// Rasterize text at the platform HiDPI scale. Set to false to use a 1.0 text backing scale.
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     text_hidpi: bool,
+
+    /// Activate an external preparation package (requires the external backend).
+    #[arg(long = "plugin", value_name = "PACKAGE_DIRECTORY")]
+    plugins: Vec<std::path::PathBuf>,
+
+    /// Enable the bundled Sakura Moyu Chinese patch preparation adapter.
+    #[arg(long)]
+    sakura_moyu_chs_patch: bool,
 }
 
 // use dhat;
@@ -100,24 +112,56 @@ fn main() -> Result<()> {
     // let _profiler = dhat::Profiler::new_heap();
     // env_logger::init();
     let args = CliArgs::parse();
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     if let Some(project_dir) = args.project_dir.as_deref() {
-        set_base_path(project_dir);
+        crate::utils::file::set_base_path(project_dir);
     }
     let nls = args.nls;
     let system_font = args.system_font;
-    let parser = load_script(nls)?;
-    let title = parser.get_title();
-    let size = parser.get_screen_size();
-    let script_engine = ThreadManager::new();
-
-    let app = App::app_with_config(app_config(&title, size))
-        .with_scene::<AnzuScene>()
-        .with_script_engine(script_engine)
-        .with_window_title(&title)
-        .with_window_size(size)
-        .with_parser(parser)
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    let app = {
+        let base_path = crate::utils::file::app_base_path();
+        let root = args
+            .project_dir
+            .as_deref()
+            .map(std::path::Path::new)
+            .unwrap_or(base_path.get_path());
+        boot::prepare_app(
+            root,
+            nls,
+            &preparation::LaunchOptions {
+                plugins: args.plugins,
+                sakura_moyu_chs_patch: args.sakura_moyu_chs_patch,
+            },
+        )?
         .with_text_hidpi_enabled(args.text_hidpi)
-        .with_vfs(nls)?;
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    let app = {
+        use crate::{
+            app::App,
+            boot::{app_config, load_script},
+            subsystem::{anzu_scene::AnzuScene, resources::thread_manager::ThreadManager},
+        };
+        anyhow::ensure!(
+            args.plugins.is_empty() && !args.sakura_moyu_chs_patch,
+            "plugins require a desktop host"
+        );
+        let parser = load_script(nls)?;
+        let title = parser.get_title();
+        let size = parser.get_screen_size();
+        let script_engine = ThreadManager::new();
+
+        let app = App::app_with_config(app_config(&title, size))
+            .with_scene::<AnzuScene>()
+            .with_script_engine(script_engine)
+            .with_window_title(&title)
+            .with_window_size(size)
+            .with_parser(parser)
+            .with_text_hidpi_enabled(args.text_hidpi)
+            .with_vfs(nls)?;
+        app
+    };
     let app = if system_font {
         app.with_system_font(true)
     } else {
@@ -192,6 +236,32 @@ fn main() -> anyhow::Result<()> {
     not(feature = "no-audio")
 ))]
 compile_error!("rfvp binary requires `gpu-render`, `soft-render`, `soft-render-core`, or `no-audio` for feature-check builds.");
+
+#[cfg(all(test, not(feature = "no_std"), feature = "gpu-render"))]
+mod launch_options_tests {
+    use super::*;
+
+    #[test]
+    fn gpu_launch_options_preserve_activation_order() {
+        let args = CliArgs::try_parse_from([
+            "rfvp",
+            "--plugin",
+            "second",
+            "--plugin=first",
+            "--sakura-moyu-chs-patch",
+        ])
+        .unwrap();
+        assert_eq!(
+            args.plugins,
+            [
+                std::path::PathBuf::from("second"),
+                std::path::PathBuf::from("first")
+            ]
+        );
+        assert!(args.sakura_moyu_chs_patch);
+        assert!(CliArgs::try_parse_from(["rfvp", "--plugin"]).is_err());
+    }
+}
 
 // test
 #[cfg(all(test, feature = "gpu-render", feature = "audio"))]

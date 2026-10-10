@@ -29,6 +29,21 @@ use crate::wasm_app_path::{
 use crate::script::parser::Nls;
 use crate::utils::file::{app_base_path, hcb_root_path};
 use crate::utils::stable_hash::StableHashMap;
+use alloc::collections::BTreeMap;
+use rfvp_plugin_api::ResourceMappings;
+
+#[cfg(all(
+    feature = "desktop-preparation",
+    not(feature = "no_std"),
+    any(target_os = "macos", target_os = "windows", target_os = "linux")
+))]
+mod prepared;
+#[cfg(all(
+    feature = "desktop-preparation",
+    not(feature = "no_std"),
+    any(target_os = "macos", target_os = "windows", target_os = "linux")
+))]
+pub(crate) use prepared::MetadataBudget;
 
 /// A simple trait alias for "readable + seekable" streams.
 pub trait ReadSeek: Read + Seek {}
@@ -297,6 +312,12 @@ pub struct VfsFile {
     pub filename_table_size: u64,
     pub entries: StableHashMap<String, VfsEntry>,
     pub nls: Nls,
+    #[cfg(all(
+        feature = "desktop-preparation",
+        not(feature = "no_std"),
+        any(target_os = "macos", target_os = "windows", target_os = "linux")
+    ))]
+    prepared_source: Option<rfvp_plugin_host::source::SourceFile>,
     #[cfg(target_arch = "wasm32")]
     wasm_pack: Option<WasmFileRef>,
 }
@@ -315,6 +336,12 @@ impl VfsFile {
             filename_table_size,
             entries,
             nls: nls.clone(),
+            #[cfg(all(
+                feature = "desktop-preparation",
+                not(feature = "no_std"),
+                any(target_os = "macos", target_os = "windows", target_os = "linux")
+            ))]
+            prepared_source: None,
             #[cfg(target_arch = "wasm32")]
             wasm_pack: None,
         })
@@ -495,19 +522,39 @@ impl VfsFile {
     pub fn open_stream_with_len(&self, name: &str) -> Result<(VfsStream, Option<u64>)> {
         #[cfg(all(not(target_arch = "wasm32"), not(target_os = "uefi")))]
         {
-            let override_path = app_base_path().join(&self.folder_name).join(name);
-            if override_path.get_path().exists() {
-                let f = File::open(override_path.get_path()).with_context(|| {
-                    format!("open override file {}", override_path.get_path().display())
-                })?;
-                let len = f.metadata().ok().map(|m| m.len());
-                return Ok((Box::new(f), len));
+            if let Some(stream) = self.open_loose_at_base(app_base_path().get_path(), name)? {
+                return Ok(stream);
             }
         }
+        self.open_raw_entry_with_len(name)
+    }
 
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "uefi")))]
+    fn open_loose_at_base(
+        &self,
+        base: &Path,
+        name: &str,
+    ) -> Result<Option<(VfsStream, Option<u64>)>> {
+        open_loose_file(&base.join(&self.folder_name).join(name))
+    }
+
+    /// Open only archive bytes, bypassing loose files and every resource mapping.
+    pub fn open_raw_entry_with_len(&self, name: &str) -> Result<(VfsStream, Option<u64>)> {
         let ent = self.entries.get(name).ok_or_else(|| {
             anyhow::anyhow!("file not found in pack {}: {}", self.path.display(), name)
         })?;
+
+        #[cfg(all(
+            feature = "desktop-preparation",
+            not(feature = "no_std"),
+            any(target_os = "macos", target_os = "windows", target_os = "linux")
+        ))]
+        if let Some(source) = &self.prepared_source {
+            return Ok((
+                Box::new(source.slice(ent.offset, ent.size)?),
+                Some(ent.size),
+            ));
+        }
 
         #[cfg(target_arch = "wasm32")]
         {
@@ -589,8 +636,15 @@ impl VfsFile {
 pub struct Vfs {
     pub files: StableHashMap<String, VfsFile>,
     pub nls: Nls,
+    resource_overlay: Option<ResourceOverlay>,
     #[cfg(target_arch = "wasm32")]
     wasm_app_path: Option<WasmAppPath>,
+}
+
+#[derive(Debug)]
+struct ResourceOverlay {
+    sources: BTreeMap<u32, VfsFile>,
+    mappings: ResourceMappings,
 }
 
 impl Default for Vfs {
@@ -600,6 +654,7 @@ impl Default for Vfs {
             return Vfs {
                 files: StableHashMap::default(),
                 nls: Nls::ShiftJIS,
+                resource_overlay: None,
                 wasm_app_path: None,
             };
         }
@@ -609,6 +664,7 @@ impl Default for Vfs {
             return Vfs {
                 files: StableHashMap::default(),
                 nls: Nls::ShiftJIS,
+                resource_overlay: None,
             };
         }
 
@@ -650,15 +706,24 @@ impl Vfs {
             }
         }
 
-        Ok(Vfs { files, nls })
+        Ok(Vfs {
+            files,
+            nls,
+            resource_overlay: None,
+        })
     }
 
     #[cfg(not(target_os = "uefi"))]
     pub fn new(nls: Nls) -> Result<Vfs> {
-        let base_path = app_base_path();
+        Self::new_at(app_base_path().get_path(), nls)
+    }
+
+    /// Read archive metadata from an explicit root without changing global paths.
+    #[cfg(not(target_os = "uefi"))]
+    pub fn new_at(base_path: &Path, nls: Nls) -> Result<Vfs> {
         let mut files = StableHashMap::default();
 
-        for entry in fs::read_dir(base_path.get_path())? {
+        for entry in fs::read_dir(base_path)? {
             let Ok(entry) = entry else {
                 continue;
             };
@@ -689,6 +754,7 @@ impl Vfs {
         Ok(Vfs {
             files,
             nls: nls.clone(),
+            resource_overlay: None,
             #[cfg(target_arch = "wasm32")]
             wasm_app_path: None,
         })
@@ -718,8 +784,31 @@ impl Vfs {
         Ok(Vfs {
             files,
             nls: nls.clone(),
+            resource_overlay: None,
             wasm_app_path: Some(app_path),
         })
+    }
+
+    /// Validate every destination before installing host-owned mappings together.
+    /// Callers remove claimed archives from `files` when constructing the original view.
+    pub fn with_resource_mappings(
+        mut self,
+        sources: BTreeMap<u32, VfsFile>,
+        mappings: ResourceMappings,
+    ) -> Result<Self> {
+        for (path, target) in mappings.iter() {
+            let source = sources.get(&target.source_id).ok_or_else(|| {
+                anyhow::anyhow!("resource {path}: unknown source {}", target.source_id)
+            })?;
+            anyhow::ensure!(
+                source.entries.contains_key(&target.entry),
+                "resource {path}: missing raw entry {:?} in source {}",
+                target.entry,
+                target.source_id
+            );
+        }
+        self.resource_overlay = Some(ResourceOverlay { sources, mappings });
+        Ok(self)
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -746,13 +835,7 @@ impl Vfs {
 
         #[cfg(all(not(target_arch = "wasm32"), not(target_os = "uefi")))]
         {
-            let fs_path = app_base_path().join(path);
-            if fs_path.get_path().exists() {
-                let f = File::open(fs_path.get_path())
-                    .with_context(|| format!("open file {}", fs_path.get_path().display()))?;
-                let len = f.metadata().ok().map(|m| m.len());
-                return Ok((Box::new(f), len));
-            }
+            self.open_stream_at_base(app_base_path().get_path(), path)
         }
 
         // On UEFI, std::fs is not reliable for path probing.  Try opening the
@@ -766,28 +849,66 @@ impl Vfs {
             }
         }
 
+        #[cfg(any(target_arch = "wasm32", target_os = "uefi"))]
+        self.open_packed_stream_with_len(path, None)
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "uefi")))]
+    pub(crate) fn open_stream_at_base(
+        &self,
+        base: &Path,
+        path: &str,
+    ) -> Result<(VfsStream, Option<u64>)> {
+        if let Some(stream) = open_loose_file(&base.join(path))? {
+            return Ok(stream);
+        }
+        self.open_packed_stream_with_len(path, Some(base))
+    }
+
+    fn open_packed_stream_with_len(
+        &self,
+        path: &str,
+        _loose_base: Option<&Path>,
+    ) -> Result<(VfsStream, Option<u64>)> {
         let (folder, inner) = path
             .split_once('/')
             .ok_or_else(|| anyhow::anyhow!("file not found: {}", path))?;
+        let folder_key = folder.to_ascii_lowercase();
+        let original = self.files.get(&folder_key);
 
-        let vf = self
-            .files
-            .get(&folder.to_ascii_lowercase())
-            .ok_or_else(|| {
-                #[cfg(target_arch = "wasm32")]
-                {
-                    if let Some(app_path) = self.wasm_app_path.as_ref() {
-                        return anyhow::anyhow!(
-                            "pack not found for folder '{}' (missing {}.bin); wasm root sample: {:?}",
-                            folder,
-                            folder,
-                            app_path.known_root_files_sample()
-                        );
-                    }
+        // Main also probes the archive's normalized folder before opening its
+        // entry. Keep that second loose-file opportunity ahead of mappings.
+        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "uefi")))]
+        if let (Some(base), Some(file)) = (_loose_base, original) {
+            if let Some(stream) = file.open_loose_at_base(base, inner)? {
+                return Ok(stream);
+            }
+        }
+        if let Some(overlay) = &self.resource_overlay {
+            if let Some(target) = overlay.mappings.get(path) {
+                return overlay.sources[&target.source_id].open_raw_entry_with_len(&target.entry);
+            }
+        }
+
+        let vf = original.ok_or_else(|| {
+            #[cfg(target_arch = "wasm32")]
+            {
+                if let Some(app_path) = self.wasm_app_path.as_ref() {
+                    return anyhow::anyhow!(
+                        "pack not found for folder '{}' (missing {}.bin); wasm root sample: {:?}",
+                        folder,
+                        folder,
+                        app_path.known_root_files_sample()
+                    );
                 }
-                anyhow::anyhow!("pack not found for folder '{}' (missing {}.bin)", folder, folder)
-            })?;
-        vf.open_stream_with_len(inner)
+            }
+            anyhow::anyhow!(
+                "pack not found for folder '{}' (missing {}.bin)",
+                folder,
+                folder
+            )
+        })?;
+        vf.open_raw_entry_with_len(inner)
     }
 
     /// Open a path as a seekable stream.
@@ -916,10 +1037,24 @@ impl Vfs {
     }
 }
 
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "uefi")))]
+fn open_loose_file(path: &Path) -> Result<Option<(VfsStream, Option<u64>)>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let file = File::open(path).with_context(|| format!("open loose file {}", path.display()))?;
+    let len = file.metadata().ok().map(|metadata| metadata.len());
+    Ok(Some((Box::new(file), len)))
+}
+
 #[cfg(target_arch = "wasm32")]
 fn normalize_vfs_key(path: &str) -> String {
     normalize_wasm_key(path)
 }
+
+#[cfg(all(test, not(target_arch = "wasm32"), not(target_os = "uefi")))]
+#[path = "vfs_plugin_tests.rs"]
+mod plugin_tests;
 
 #[cfg(test)]
 mod tests {

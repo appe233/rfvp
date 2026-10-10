@@ -899,6 +899,18 @@ pub mod font;
 pub mod legacy_save_load_ui;
 pub(crate) mod platform_random;
 pub(crate) mod platform_time;
+#[cfg(all(
+    not(feature = "no_std"),
+    feature = "sakura-moyu",
+    any(target_os = "macos", target_os = "windows", target_os = "linux")
+))]
+pub mod plugins;
+#[cfg(all(
+    not(feature = "no_std"),
+    feature = "desktop-preparation",
+    any(target_os = "macos", target_os = "windows", target_os = "linux")
+))]
+pub mod preparation;
 pub mod rendering;
 #[cfg(not(feature = "no_std"))]
 pub mod rfvp_audio;
@@ -952,7 +964,7 @@ mod android_host;
 #[cfg(all(not(feature = "no_std"), feature = "gpu-render"))]
 use crate::platform_time::Duration;
 #[cfg(all(not(feature = "no_std"), feature = "gpu-render"))]
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 #[cfg(all(not(feature = "no_std"), feature = "gpu-render"))]
 use std::os::raw::c_char;
 #[cfg(all(not(feature = "no_std"), feature = "gpu-render"))]
@@ -961,19 +973,9 @@ use std::ptr::null_mut;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(all(not(feature = "no_std"), feature = "gpu-render"))]
-use crate::app::App;
-#[cfg(all(not(feature = "no_std"), feature = "gpu-render"))]
 use crate::script::parser::Nls;
 #[cfg(all(not(feature = "no_std"), feature = "gpu-render"))]
-use crate::subsystem::anzu_scene::AnzuScene;
-#[cfg(all(not(feature = "no_std"), feature = "gpu-render"))]
-use crate::subsystem::resources::thread_manager::ThreadManager;
-#[cfg(all(not(feature = "no_std"), feature = "gpu-render"))]
-use crate::utils::file::set_base_path;
-#[cfg(all(not(feature = "no_std"), feature = "gpu-render"))]
 use anyhow::Result;
-#[cfg(all(not(feature = "no_std"), feature = "gpu-render"))]
-use boot::{app_config, load_script};
 #[cfg(all(not(feature = "no_std"), feature = "gpu-render"))]
 use log::LevelFilter;
 
@@ -1002,22 +1004,51 @@ fn default_text_hidpi_enabled() -> bool {
 
 #[cfg(all(not(feature = "no_std"), feature = "gpu-render"))]
 fn run_rfvp(game_root: &str, nls: Nls) -> Result<()> {
-    set_base_path(game_root);
-    let parser = load_script(nls)?;
-    let title = parser.get_title();
-    let size = parser.get_screen_size();
-    let script_engine = ThreadManager::new();
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    {
+        return run_rfvp_with_options(game_root, nls, &preparation::LaunchOptions::default());
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        use crate::{
+            app::App,
+            boot::{app_config, load_script},
+            subsystem::{anzu_scene::AnzuScene, resources::thread_manager::ThreadManager},
+            utils::file::set_base_path,
+        };
+        set_base_path(game_root);
+        let parser = load_script(nls)?;
+        let title = parser.get_title();
+        let size = parser.get_screen_size();
+        let script_engine = ThreadManager::new();
 
-    App::app_with_config(app_config(&title, size))
-        .with_scene::<AnzuScene>()
-        .with_script_engine(script_engine)
-        .with_window_title(&title)
-        .with_window_size(size)
-        .with_parser(parser)
+        App::app_with_config(app_config(&title, size))
+            .with_scene::<AnzuScene>()
+            .with_script_engine(script_engine)
+            .with_window_title(&title)
+            .with_window_size(size)
+            .with_parser(parser)
+            .with_text_hidpi_enabled(default_text_hidpi_enabled())
+            .with_vfs(nls)?
+            .run();
+
+        Ok(())
+    }
+}
+
+#[cfg(all(
+    not(feature = "no_std"),
+    feature = "gpu-render",
+    any(target_os = "macos", target_os = "windows", target_os = "linux")
+))]
+fn run_rfvp_with_options(
+    game_root: &str,
+    nls: Nls,
+    options: &preparation::LaunchOptions,
+) -> Result<()> {
+    boot::prepare_app(std::path::Path::new(game_root), nls, options)?
         .with_text_hidpi_enabled(default_text_hidpi_enabled())
-        .with_vfs(nls)?
         .run();
-
     Ok(())
 }
 
@@ -1042,6 +1073,30 @@ pub unsafe extern "C" fn rfvp_pump_create(
     game_root_utf8: *const c_char,
     nls_utf8: *const c_char,
 ) -> *mut RfvpPumpHandle {
+    rfvp_pump_create_v1(game_root_utf8, nls_utf8, b"{}".as_ptr(), 2)
+}
+
+/// Create a desktop pump with length-delimited LaunchOptions JSON (at most 64 KiB).
+/// All pointers must be valid for the duration of this call. Returns NULL on error.
+#[cfg(all(
+    not(feature = "no_std"),
+    feature = "gpu-render",
+    any(target_os = "macos", target_os = "windows", target_os = "linux")
+))]
+#[no_mangle]
+pub unsafe extern "C" fn rfvp_pump_create_v1(
+    game_root_utf8: *const c_char,
+    nls_utf8: *const c_char,
+    options_json: *const u8,
+    options_len: usize,
+) -> *mut RfvpPumpHandle {
+    let options = match launch_options_from_ffi(options_json, options_len) {
+        Ok(options) => options,
+        Err(error) => {
+            log::error!("rfvp_pump_create_v1: {error:#}");
+            return null_mut();
+        }
+    };
     if game_root_utf8.is_null() || nls_utf8.is_null() {
         return null_mut();
     }
@@ -1064,31 +1119,11 @@ pub unsafe extern "C" fn rfvp_pump_create(
         }
     };
 
-    // Build the app but do not enter the blocking run loop.
-    set_base_path(&game_root);
-    let parser = match load_script(nls) {
-        Ok(p) => p,
+    // Preparation completes before creating a window or starting a worker.
+    let builder = match boot::prepare_app(std::path::Path::new(&game_root), nls, &options) {
+        Ok(builder) => builder.with_text_hidpi_enabled(default_text_hidpi_enabled()),
         Err(e) => {
-            log::error!("rfvp_pump_create: failed to load script: {e:?}");
-            return null_mut();
-        }
-    };
-    let title = parser.get_title();
-    let size = parser.get_screen_size();
-    let script_engine = ThreadManager::new();
-
-    let builder = match App::app_with_config(app_config(&title, size))
-        .with_scene::<AnzuScene>()
-        .with_script_engine(script_engine)
-        .with_window_title(&title)
-        .with_window_size(size)
-        .with_parser(parser)
-        .with_text_hidpi_enabled(default_text_hidpi_enabled())
-        .with_vfs(nls)
-    {
-        Ok(b) => b,
-        Err(e) => {
-            log::error!("rfvp_pump_create: failed to build AppBuilder: {e:?}");
+            log::error!("rfvp_pump_create: preparation failed: {e:#}");
             return null_mut();
         }
     };
@@ -1102,6 +1137,76 @@ pub unsafe extern "C" fn rfvp_pump_create(
     };
 
     Box::into_raw(Box::new(RfvpPumpHandle { inst }))
+}
+
+#[cfg(all(
+    test,
+    not(feature = "no_std"),
+    feature = "gpu-render",
+    any(target_os = "macos", target_os = "windows", target_os = "linux")
+))]
+mod desktop_options_tests;
+
+/// Decode the versioned desktop options before any preparation or presentation.
+#[cfg(all(
+    not(feature = "no_std"),
+    feature = "gpu-render",
+    any(target_os = "macos", target_os = "windows", target_os = "linux")
+))]
+unsafe fn launch_options_from_ffi(
+    bytes: *const u8,
+    len: usize,
+) -> Result<preparation::LaunchOptions> {
+    anyhow::ensure!(!bytes.is_null(), "launch options pointer is null");
+    anyhow::ensure!(
+        len <= preparation::MAX_OPTIONS_BYTES,
+        "launch options exceed 64 KiB"
+    );
+    preparation::LaunchOptions::from_json(std::slice::from_raw_parts(bytes, len))
+}
+
+/// Blocking desktop launch with length-delimited LaunchOptions JSON.
+/// Returns 0 on success, 1 on launch failure, 2 on invalid arguments/options.
+/// Root and NLS must be NUL-terminated UTF-8; options need not be NUL-terminated.
+#[cfg(all(
+    not(feature = "no_std"),
+    feature = "gpu-render",
+    any(target_os = "macos", target_os = "windows", target_os = "linux")
+))]
+#[no_mangle]
+pub unsafe extern "C" fn rfvp_run_entry_v1(
+    game_root_utf8: *const c_char,
+    nls_utf8: *const c_char,
+    options_json: *const u8,
+    options_len: usize,
+) -> i32 {
+    if game_root_utf8.is_null() || nls_utf8.is_null() {
+        return 2;
+    }
+    let arguments = (|| -> Result<_> {
+        let root = CStr::from_ptr(game_root_utf8).to_str()?;
+        anyhow::ensure!(!root.is_empty(), "game root is empty");
+        let nls = CStr::from_ptr(nls_utf8).to_str()?.parse::<Nls>()?;
+        Ok((
+            root,
+            nls,
+            launch_options_from_ffi(options_json, options_len)?,
+        ))
+    })();
+    let (root, nls, options) = match arguments {
+        Ok(arguments) => arguments,
+        Err(error) => {
+            log::error!("rfvp_run_entry_v1: {error:#}");
+            return 2;
+        }
+    };
+    match run_rfvp_with_options(root, nls, &options) {
+        Ok(()) => 0,
+        Err(error) => {
+            log::error!("rfvp_run_entry_v1: {error:#}");
+            1
+        }
+    }
 }
 
 /// Pump events for up to `timeout_ms` milliseconds.

@@ -207,6 +207,24 @@ impl App {
     }
 
     pub fn app_with_config(app_config: AppConfig) -> Box<AppBuilder> {
+        Self::init_logging(&app_config);
+        AppBuilder::new_boxed(app_config)
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    pub fn app_with_prepared(
+        app_config: AppConfig,
+        prepared: crate::preparation::PreparedGame,
+    ) -> Result<Box<AppBuilder>> {
+        Self::init_logging(&app_config);
+        prepared.activate_paths()?;
+        let (parser, world) = prepared.into_world();
+        Ok(Box::new(
+            AppBuilder::new_with_world(app_config, world).with_parser(parser),
+        ))
+    }
+
+    fn init_logging(app_config: &AppConfig) {
         crate::utils::logger::Logger::init_logging(app_config.logger_config.clone());
 
         // iOS has a small main-thread stack; avoid formatting the full config with Debug here.
@@ -217,8 +235,6 @@ impl App {
         );
         #[cfg(target_os = "ios")]
         log::info!("Starting the app");
-
-        AppBuilder::new_boxed(app_config)
     }
 
     fn setup(&mut self) {
@@ -1167,7 +1183,7 @@ impl App {
 
             let mut gd = gd_write(&self.game_data);
             let nls = gd.get_nls();
-            let state_snap = crate::subsystem::save_state::SaveStateSnapshotV1::capture(&mut gd);
+            let state_snap = crate::subsystem::save_state::ResumableSaveState::capture(&mut gd)?;
 
             if slot == u32::MAX {
                 // SaveCreate(3, nil/int): prepare local_saved payload in memory.
@@ -2095,6 +2111,10 @@ impl AppBuilder {
             }
         };
 
+        Self::new_with_world(config, world)
+    }
+
+    fn new_with_world(config: AppConfig, world: Box<GameData>) -> Self {
         Self {
             config,
             scheduler: Default::default(),

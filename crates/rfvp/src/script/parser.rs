@@ -22,6 +22,7 @@ use std::io::Read;
 #[cfg(not(feature = "no_std"))]
 use std::path::Path;
 
+use super::string_patch::{SharedStrings, StringReplacements};
 use anyhow::Result;
 
 #[cfg(target_os = "uefi")]
@@ -97,6 +98,7 @@ pub struct Parser {
     game_title: String,
     pub syscall_count: u16,
     pub syscalls: SyscallMap,
+    string_replacements: Option<SharedStrings>,
 }
 
 impl Parser {
@@ -135,6 +137,7 @@ impl Parser {
                 game_title: String::new(),
                 syscall_count: 0,
                 syscalls: SyscallMap::default(),
+                string_replacements: None,
             };
 
             uefi_parser_stage!("[UEFI] Parser::from_bytes before parser()");
@@ -177,6 +180,7 @@ impl Parser {
             game_title: String::new(),
             syscall_count: 0,
             syscalls: SyscallMap::default(),
+            string_replacements: None,
         };
 
         parser.parser()?;
@@ -485,6 +489,24 @@ impl Parser {
 
     pub fn get_syscall(&self, id: u16) -> Option<&Syscall> {
         self.syscalls.get(&(id as usize))
+    }
+
+    /// Attach a validated table to this script. Original bytes and NLS are retained.
+    pub fn with_string_replacements(mut self, strings: StringReplacements) -> Result<Self> {
+        for (offset, _) in strings.iter() {
+            anyhow::ensure!(
+                self.is_code_area(offset),
+                "replacement offset {offset:#x} is outside this script's code area"
+            );
+        }
+        self.string_replacements = Some(SharedStrings::new(strings));
+        Ok(self)
+    }
+
+    pub fn replacement_string(&self, offset: u32) -> Option<&str> {
+        self.string_replacements
+            .as_ref()
+            .and_then(|strings| strings.get(offset))
     }
 
     pub fn get_all_syscalls(&self) -> &SyscallMap {

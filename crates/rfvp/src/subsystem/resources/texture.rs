@@ -514,6 +514,7 @@ struct HZC1HDR {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
     use std::path::Path;
 
     #[test]

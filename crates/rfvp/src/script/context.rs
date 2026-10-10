@@ -90,6 +90,10 @@ pub struct ContextSnapshotV1 {
     pub should_break: bool,
 }
 
+#[cfg(all(test, not(feature = "no_std")))]
+#[path = "string_patch_tests.rs"]
+mod string_patch_tests;
+
 impl Context {
     pub fn new(start_addr: u32, id: u32) -> Self {
         let mut ctx = Context {
@@ -611,6 +615,10 @@ impl Context {
         let addr = self.cursor as u32; // points to the first byte of the string payload
 
         let s = parser.read_cstring(self.cursor, len)?;
+        let s = parser
+            .replacement_string(addr)
+            .map(alloc::string::String::from)
+            .unwrap_or(s);
         self.cursor += len;
 
         // log::info!("push_string: {}", &s);

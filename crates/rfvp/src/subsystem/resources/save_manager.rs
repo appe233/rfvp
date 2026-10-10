@@ -801,14 +801,20 @@ impl SaveManager {
         self.local_saved_bytes.is_some()
     }
 
-    /// Finalize preparation of `local_saved_bytes` from the captured thumbnail and optional RFVS state.
+    #[cfg(test)]
+    pub(crate) fn local_saved_bytes(&self) -> Option<&[u8]> {
+        self.local_saved_bytes.as_deref()
+    }
+
+    /// Finalize preparation of `local_saved_bytes` from the captured thumbnail and optional
+    /// resumable state (profile block + RFVS chunk).
     pub fn finalize_local_savedata_prepare(
         &mut self,
         nls: Nls,
         thumb_w: u32,
         thumb_h: u32,
         thumb_rgba: &[u8],
-        state: Option<&crate::subsystem::save_state::SaveStateSnapshotV1>,
+        state: Option<&crate::subsystem::save_state::ResumableSaveState>,
     ) -> Result<()> {
         let expected = (thumb_w as usize)
             .saturating_mul(thumb_h as usize)
@@ -823,7 +829,7 @@ impl SaveManager {
 
         let mut bytes = self.build_save_file_bytes(nls, thumb_rgba)?;
         if let Some(snap) = state {
-            crate::subsystem::save_state::append_state_chunk_v1(&mut bytes, snap)?;
+            crate::subsystem::save_state::append_resumable_state(&mut bytes, snap)?;
         }
 
         self.local_saved_bytes = Some(bytes.into_boxed_slice());
@@ -884,7 +890,7 @@ impl SaveManager {
         thumb_w: u32,
         thumb_h: u32,
         thumb_rgba: &[u8],
-        state: Option<&crate::subsystem::save_state::SaveStateSnapshotV1>,
+        state: Option<&crate::subsystem::save_state::ResumableSaveState>,
     ) -> Result<()> {
         #[cfg(target_os = "uefi")]
         {
@@ -914,7 +920,7 @@ impl SaveManager {
 
             let mut bytes = self.build_save_file_bytes(nls, thumb_rgba)?;
             if let Some(snap) = state {
-                crate::subsystem::save_state::append_state_chunk_v1(&mut bytes, snap)?;
+                crate::subsystem::save_state::append_resumable_state(&mut bytes, snap)?;
             }
             let path = SaveItem::get_save_path(self.current_save_slot);
             if let Some(parent) = path.parent() {

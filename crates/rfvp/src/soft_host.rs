@@ -8,11 +8,12 @@ use std::{
     collections::HashMap,
     fs::File,
     num::NonZeroU32,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
 use crate::platform_time::Instant;
+use crate::preparation::{prepare_game, LaunchOptions, PreparedGame, ScriptDiscovery};
 use anyhow::{Context, Result};
 use regex::Regex;
 use winit::event_loop::OwnedDisplayHandle;
@@ -39,7 +40,6 @@ use crate::{
     },
     utils::{
         ani::{self, icondir_to_custom_cursor, CursorBundle},
-        file::set_base_path,
         logger::Logger,
     },
     vm_worker::VmWorker,
@@ -67,6 +67,7 @@ struct SoftHostArgs {
     nls: Nls,
     system_font: bool,
     window_size: Option<(u32, u32)>,
+    launch: LaunchOptions,
 }
 
 impl Default for SoftHostArgs {
@@ -76,35 +77,31 @@ impl Default for SoftHostArgs {
             nls: Nls::ShiftJIS,
             system_font: false,
             window_size: None,
+            launch: LaunchOptions::default(),
         }
     }
 }
 
 pub fn run_from_args() -> Result<()> {
-    run(parse_args())
+    run(parse_args()?)
 }
 
 fn run(args: SoftHostArgs) -> Result<()> {
-    if let Some(project_dir) = args.project_dir.as_deref() {
-        set_base_path(project_dir);
-    }
-
-    let hcb_path = find_hcb(crate::utils::file::app_base_path().get_path())?;
-    if let Some(parent) = hcb_path.parent() {
-        if let Some(parent) = parent.to_str() {
-            set_base_path(parent);
-            crate::utils::file::set_hcb_root_path(parent);
-        }
-    }
-    let mut parser = crate::script::parser::Parser::new(hcb_path, args.nls)?;
-    let title = parser.get_title();
-    let virtual_size = parser.get_screen_size();
+    let root = args
+        .project_dir
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| crate::utils::file::app_base_path().get_path().to_path_buf());
+    let prepared = prepare_game(&root, args.nls, ScriptDiscovery::HcbOnly, &args.launch)?;
+    let title = prepared.parser.get_title();
+    let virtual_size = prepared.parser.get_screen_size();
 
     Logger::init_logging(Some(crate::config::logger_config::LoggerConfig {
         app_level_filter: log::LevelFilter::Info,
         level_filter: log::LevelFilter::Debug,
     }));
     log::info!("Starting soft-render host");
+    prepared.activate_paths()?;
 
     let event_loop = EventLoop::new().context("Event loop could not be created")?;
     event_loop.set_control_flow(ControlFlow::Poll);
@@ -130,7 +127,7 @@ fn run(args: SoftHostArgs) -> Result<()> {
 
     let mut host = SoftHost::new(
         &event_loop,
-        &mut parser,
+        prepared,
         title,
         virtual_size,
         window.clone(),
@@ -188,15 +185,13 @@ struct SoftHost {
 impl SoftHost {
     fn new(
         event_loop: &EventLoop<()>,
-        parser: &mut crate::script::parser::Parser,
+        prepared: PreparedGame,
         _title: String,
         virtual_size: (u32, u32),
         window: Arc<Window>,
         args: SoftHostArgs,
     ) -> Result<Self> {
-        let mut world = boxed_default_game_data();
-        world.vfs = Vfs::new(args.nls)?;
-        world.nls = parser.nls;
+        let (parser, mut world) = prepared.into_world();
         world.set_can_fullscreen(false);
         world.set_window(EngineWindow::new(
             (window.inner_size().width, window.inner_size().height),
@@ -239,7 +234,7 @@ impl SoftHost {
         layer_machine.apply_scene_action(SceneAction::Start, &mut world);
 
         let game_data = Arc::new(RwLock::new(world));
-        let vm_worker = VmWorker::spawn(game_data.clone(), parser.clone(), script_engine);
+        let vm_worker = VmWorker::spawn(game_data.clone(), parser, script_engine);
 
         Ok(Self {
             game_data,
@@ -552,35 +547,14 @@ fn load_ani_cursor_table(event_loop: &EventLoop<()>, vfs: &Vfs) -> HashMap<u32, 
     cursor_table
 }
 
-fn boxed_default_game_data() -> Box<GameData> {
-    let mut boxed: Box<std::mem::MaybeUninit<GameData>> = Box::new_uninit();
-    unsafe {
-        GameData::init_default_in_place(boxed.as_mut_ptr().cast());
-        let raw: *mut GameData = Box::into_raw(boxed).cast();
-        Box::from_raw(raw)
-    }
+fn parse_args() -> Result<SoftHostArgs> {
+    parse_args_from(&std::env::args().collect::<Vec<_>>())
 }
 
-fn find_hcb(game_path: impl AsRef<Path>) -> Result<PathBuf> {
-    let mut path = game_path.as_ref().to_path_buf();
-    path.push("*.hcb");
-
-    let matches: Vec<_> = glob::glob(&path.to_string_lossy())?.flatten().collect();
-    if matches.is_empty() {
-        anyhow::bail!(
-            "No hcb file found in the game directory: {}",
-            game_path.as_ref().display()
-        );
-    }
-
-    Ok(matches[0].to_path_buf())
-}
-
-fn parse_args() -> SoftHostArgs {
+fn parse_args_from(args: &[String]) -> Result<SoftHostArgs> {
     let mut args_out = SoftHostArgs::default();
     let mut width: Option<u32> = None;
     let mut height: Option<u32> = None;
-    let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
     while i < args.len() {
         let arg = &args[i];
@@ -605,6 +579,21 @@ fn parse_args() -> SoftHostArgs {
                 eprintln!("rfvp: --nls requires a value (sjis, gbk, utf8)");
                 std::process::exit(1);
             }
+        } else if let Some(value) = arg.strip_prefix("--plugin=") {
+            anyhow::ensure!(!value.is_empty(), "--plugin requires a package directory");
+            args_out.launch.plugins.push(PathBuf::from(value));
+        } else if arg == "--plugin" {
+            let value = args
+                .get(i + 1)
+                .context("--plugin requires a package directory")?;
+            anyhow::ensure!(
+                !value.is_empty() && !value.starts_with("--"),
+                "--plugin requires a package directory"
+            );
+            args_out.launch.plugins.push(PathBuf::from(value));
+            i += 1;
+        } else if arg == "--sakura-moyu-chs-patch" {
+            args_out.launch.sakura_moyu_chs_patch = true;
         } else if arg == "--system-font" {
             args_out.system_font = true;
         } else if let Some(value) = arg.strip_prefix("--width=") {
@@ -628,7 +617,36 @@ fn parse_args() -> SoftHostArgs {
     if width.is_some() || height.is_some() {
         args_out.window_size = Some((width.unwrap_or(1280).max(1), height.unwrap_or(720).max(1)));
     }
-    args_out
+    args_out.launch.validate()?;
+    Ok(args_out)
+}
+
+#[cfg(test)]
+mod launch_options_tests {
+    use super::*;
+
+    #[test]
+    fn software_launch_options_preserve_order_and_reject_missing_packages() {
+        let parse = |args: &[&str]| {
+            parse_args_from(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+        };
+        let args = parse(&[
+            "rfvp",
+            "--plugin",
+            "second",
+            "--plugin=first",
+            "--sakura-moyu-chs-patch",
+        ])
+        .unwrap();
+        assert_eq!(
+            args.launch.plugins,
+            [PathBuf::from("second"), PathBuf::from("first")]
+        );
+        assert!(args.launch.sakura_moyu_chs_patch);
+        assert!(parse(&["rfvp", "--plugin"]).is_err());
+        assert!(parse(&["rfvp", "--plugin="]).is_err());
+        assert!(parse(&["rfvp", "--plugin", "--system-font"]).is_err());
+    }
 }
 
 fn parse_nls(value: &str) -> Nls {

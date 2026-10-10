@@ -1,3 +1,5 @@
+#[cfg(not(feature = "no_std"))]
+use anyhow::Context;
 use anyhow::Result;
 #[cfg(not(feature = "no_std"))]
 use std::fs;
@@ -9,7 +11,8 @@ use crate::subsystem::resources::save_manager::SaveItem;
 use crate::subsystem::resources::{
     motion_manager::DissolveType, thread_manager::ThreadManager, thread_wrapper::ThreadRequest,
 };
-use crate::subsystem::save_state::try_decode_state_chunk_v1;
+#[cfg(not(feature = "no_std"))]
+use crate::subsystem::save_state::preflight_load;
 use crate::subsystem::world::GameData;
 
 #[cfg(target_os = "uefi")]
@@ -104,38 +107,8 @@ impl VmRunner {
                 let path = SaveItem::resolve_save_path_for_read(slot);
                 match fs::read(&path) {
                     Ok(bytes) => {
-                        let nls = game.get_nls();
-                        if let Err(e) = game
-                            .save_manager
-                            .load_slot_into_current_from_bytes(slot, nls, &bytes)
-                        {
-                            log::error!(
-                                "load: failed to parse save header for slot {}: {:#}",
-                                slot,
-                                e
-                            );
-                        }
-
-                        match try_decode_state_chunk_v1(&bytes) {
-                            Ok(Some(s)) => {
-                                if let Err(e) = s.apply(game, &mut self.tm) {
-                                    log::error!("load: apply SaveStateSnapshotV1 failed: {:#}", e);
-                                }
-                            }
-                            Ok(None) => {
-                                // No RFVS chunk: header-only save (engine save or older rfvp save).
-                                log::warn!(
-                                    "load: no RFVS chunk found in slot {} (header-only load)",
-                                    slot
-                                );
-                            }
-                            Err(e) => {
-                                log::error!(
-                                    "load: failed to decode RFVS chunk for slot {}: {:#}",
-                                    slot,
-                                    e
-                                );
-                            }
+                        if let Err(e) = self.load_slot_from_bytes(game, slot, &bytes) {
+                            log::error!("{:#}", e);
                         }
                     }
                     Err(e) => {
@@ -223,6 +196,51 @@ impl VmRunner {
         }
 
         Ok(report)
+    }
+
+    /// Restore one save slot. Decoding and plugin-profile compatibility are checked first;
+    /// a rejected save leaves the header fields, globals, scene, audio, and VM untouched.
+    #[cfg(not(feature = "no_std"))]
+    pub(crate) fn load_slot_from_bytes(
+        &mut self,
+        game: &mut GameData,
+        slot: u32,
+        bytes: &[u8],
+    ) -> Result<()> {
+        let preflight = preflight_load(bytes, game).with_context(|| {
+            format!("load: rejected save slot {slot}; the running session was left unchanged")
+        })?;
+        if let Some(diagnostic) = &preflight.diagnostic {
+            log::warn!("load: slot {}: {}", slot, diagnostic);
+        }
+
+        let nls = game.get_nls();
+        if let Err(e) = game
+            .save_manager
+            .load_slot_into_current_from_bytes(slot, nls, bytes)
+        {
+            log::error!(
+                "load: failed to parse save header for slot {}: {:#}",
+                slot,
+                e
+            );
+        }
+
+        match preflight.snapshot {
+            Some(s) => {
+                if let Err(e) = s.apply(game, &mut self.tm) {
+                    log::error!("load: apply SaveStateSnapshotV1 failed: {:#}", e);
+                }
+            }
+            None => {
+                // No RFVS chunk: header-only save (engine save or older rfvp save).
+                log::warn!(
+                    "load: no RFVS chunk found in slot {} (header-only load)",
+                    slot
+                );
+            }
+        }
+        Ok(())
     }
 
     fn process_deferred_text_requests(&mut self, game: &mut GameData) {
