@@ -37,7 +37,7 @@ def package(path, module, script_hash, plugin_id, inputs, claims):
     manifest = dict(schema_version=1, id=plugin_id, version="0.1.0", api_major=1,
                     api_minor=0, capabilities=["script-string-table-v1", "resource-mapping-v1"],
                     module="plugin.wasm", supported_scripts=[script_hash], inputs=inputs, claimed_archives=claims)
-    (path / "plugin.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    (path / "plugin.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
 
 def main():
@@ -55,7 +55,7 @@ def main():
     (game / "patch.dat").write_bytes(bytes(8) + struct.pack("<II", len(payload), len(compressed)) + compressed)
     plan = dict(strings=[dict(offset=6, text="synthetic")],
                 resources=[dict(path="graph/menu", source_id=2, entry="menu")])
-    (game / "plan.json").write_text(json.dumps(plan))
+    (game / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
     run(["cargo", "build", "-p", "rfvp", "--example", "plugin_prepare_probe", "--no-default-features",
          "--features", "soft-render-core,no-audio,sakura-moyu,external-plugins"])
     host = TARGET / "debug/examples" / ("plugin_prepare_probe" + (".exe" if os.name == "nt" else ""))
@@ -73,7 +73,7 @@ def main():
 
     def probe(label, *options):
         assert sha(host) == initial_host, "host executable changed"
-        output = run([str(host), str(game), *map(str, options)], capture_output=True, text=True)
+        output = run([str(host), str(game), *map(str, options)], capture_output=True, encoding="utf-8")
         value = json.loads(output.stdout.strip().splitlines()[-1])
         results[label] = value
         return value
@@ -103,19 +103,19 @@ def main():
     shutil.copyfile(game / "patch.bin", game / "other.bin")
     package(claim_only, normal / "plugin.wasm", script_hash, "example.claim-only", ["plan.json", "other.bin"], ["other.bin"])
     try:
-        (game / "plan.json").write_text(json.dumps(dict(strings=[], resources=[])))
+        (game / "plan.json").write_text(json.dumps(dict(strings=[], resources=[])), encoding="utf-8")
         union = probe("union-of-claims", sakura, claim_only)
         assert union["text"] == "你好"
         assert union["resource_tail"] == list(b"ranslated"), "later claim polluted original matching view"
         assert len(union["session"]["plugins"]) == 2
     finally:
-        (game / "plan.json").write_text(json.dumps(plan))
+        (game / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
         (game / "other.bin").unlink()
     assert sha(host) == initial_host
     report = dict(host_sha256=initial_host, platform=__import__("platform").platform(),
                   module_bytes={p.name: (p / "plugin.wasm").stat().st_size for p in [sakura, normal, alternate]},
                   runs=results)
-    (OUT / "results.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+    (OUT / "results.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(dict(status="passed", host_sha256=initial_host, runs=len(results), report=str(OUT / "results.json"))))
 
 

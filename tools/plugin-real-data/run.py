@@ -47,7 +47,7 @@ def build_probe(name, source, features, log_dir):
                 f'rfvp = {{ path = {json.dumps(str(source / "crates/rfvp"))}, default-features = false, '
                 f'features = {json.dumps(rfvp_features)} }}\n'
                 '[features]\ncurrent = []\nreference-sakura = []\n')
-    (project / "Cargo.toml").write_text(manifest)
+    (project / "Cargo.toml").write_text(manifest, encoding="utf-8")
     shutil.copyfile(source / "Cargo.lock", project / "Cargo.lock")
     # Versions are pinned by the seeded lockfile; set CARGO_NET_OFFLINE=true to forbid fetching.
     command = ["cargo", "build", "--release", "--manifest-path", str(project / "Cargo.toml"),
@@ -77,9 +77,9 @@ def execute(exe, args, log_path, timed=False):
     if timed:
         command = ["/usr/bin/time", "-l" if sys.platform == "darwin" else "-v", *command]
     started = time.perf_counter()
-    result = subprocess.run(command, capture_output=True, text=True)
+    result = subprocess.run(command, capture_output=True, encoding="utf-8")
     wall = time.perf_counter() - started
-    log_path.write_text(result.stderr)
+    log_path.write_text(result.stderr, encoding="utf-8")
     if result.returncode != 0:
         return {"status": "error", "error": result.stderr.strip().splitlines()[-1:] if result.stderr else []}, wall, None
     value = json.loads(result.stdout.strip().splitlines()[-1])
@@ -149,7 +149,7 @@ def main():
     if listing["status"] != "ok":
         raise SystemExit(f"enumeration failed: {listing}")
     list_path = output / "list.json"
-    list_path.write_text(json.dumps({k: listing[k] for k in ["string_starts", "paths"]}))
+    list_path.write_text(json.dumps({k: listing[k] for k in ["string_starts", "paths"]}), encoding="utf-8")
     runs = {"main-disabled": ("main", ["disabled"]), "branch-reference": ("branch", ["reference"]),
             "current-disabled": ("current", ["disabled"]), "current-bundled": ("current", ["bundled"]),
             "current-external": ("current", ["external", package])}
@@ -161,7 +161,7 @@ def main():
         value, wall, _ = execute(probes[probe], ["observe", root, args.nls, list_path, *mode], output / f"{label}.log")
         if value["status"] != "ok":
             raise SystemExit(f"FAIL {label}: {value['error']}")
-        (output / f"{label}.json").write_text(json.dumps(value))
+        (output / f"{label}.json").write_text(json.dumps(value), encoding="utf-8")
         observed[label] = value
     compare(observed["main-disabled"], observed["current-disabled"], "plugins disabled == main")
     compare(observed["branch-reference"], observed["current-bundled"], "bundled Sakura == reference branch")
@@ -214,7 +214,7 @@ def main():
         "comparisons": ["main-disabled == current-disabled", "branch-reference == current-bundled",
                         "branch-reference == current-external"],
     }
-    (output / "report.json").write_text(json.dumps(report, indent=2) + "\n")
+    (output / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     summary = {k: {"median_prepare_ms": v["median_prepare_ms"], "max_peak_rss_mib": round(v["max_peak_rss_bytes"] / 2**20, 1)}
                for k, v in timings.items()}
     print(json.dumps({"counts": report["counts"], "timings": summary}, indent=2))

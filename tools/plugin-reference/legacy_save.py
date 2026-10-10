@@ -64,7 +64,7 @@ def main():
         with (output / log_name).open("w") as log:
             result = subprocess.run(command, cwd=repo, env=dict(os.environ, **env), stdout=log,
                                     stderr=subprocess.STDOUT)
-        text = (output / log_name).read_text()
+        text = (output / log_name).read_text(encoding="utf-8")
         require(result.returncode == 0, f"{name} failed; see {output / log_name}")
         require("1 passed" in text, f"{name} did not run")
 
@@ -75,8 +75,8 @@ def main():
     new_data = profiled.read_bytes()
     require(b"RFPM" in new_data and new_data.endswith(b"RFVS"), "working tree did not write a profiled save")
     observed = subprocess.run([str(exe), "read", str(profiled)], check=True, capture_output=True,
-                              text=True).stdout
-    (output / "main-read.txt").write_text(observed)
+                              encoding="utf-8").stdout
+    (output / "main-read.txt").write_text(observed, encoding="utf-8")
     expected = ("title=saved title\nitem_has_title=true\nthumb=[0, 0, 0, 0]\n"
                 "const_string=\u4f60\u597d@6\ngraph5=graph/menu\n")
     require(observed == expected, f"main observed unexpected values:\n{observed}")
@@ -84,7 +84,7 @@ def main():
     identity = source_identity(repo)
     report = {
         "platform": {"system": platform.system(), "release": platform.release(), "machine": platform.machine()},
-        "rustc": subprocess.check_output(["rustc", "--version"], text=True).strip(),
+        "rustc": subprocess.check_output(["rustc", "--version"], encoding="utf-8").strip(),
         "main_commit": commit,
         "implementation_base_commit": identity["base_commit"],
         "implementation_source_sha256": identity["source_sha256"],
@@ -99,7 +99,7 @@ def main():
         "test_features": TEST_FEATURES,
         "result": "passed",
     }
-    (output / "report.json").write_text(json.dumps(report, indent=2) + "\n")
+    (output / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, indent=2))
 
 

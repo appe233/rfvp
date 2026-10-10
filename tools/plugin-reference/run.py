@@ -24,7 +24,7 @@ COMMON_FEATURES = ["soft-render-core", "no-audio", "zlib-flate2"]
 
 
 def run(args, cwd=None):
-    return subprocess.check_output(args, cwd=cwd, text=True).strip()
+    return subprocess.check_output(args, cwd=cwd, encoding="utf-8").strip()
 
 
 def sha(data):
@@ -115,7 +115,7 @@ def fixture(root, nls, variant="valid"):
         pack(root / "patch.bin", [("menu_bg", b"patched-menu"), ("title_logo1", b"patched-logo"),
                                   ("ambiguous", b"patched-ambiguous"), ("unmatched", b"patched-unmatched"),
                                   ("Menu名", b"patched-case")], encoding)
-    (root / "case.json").write_text(json.dumps({"instruction_starts": starts}))
+    (root / "case.json").write_text(json.dumps({"instruction_starts": starts}), encoding="utf-8")
     return {"originals": originals, "addresses": addresses, "cursors": cursors, "code_end": 4 + len(code)}
 
 
@@ -195,7 +195,7 @@ def main():
     fixture_parent = (args.fixture_root or output / "fixtures").resolve() / output.name
     fixture_parent.mkdir(parents=True)
     marker = fixture_parent / "case-probe"
-    marker.write_text("case")
+    marker.write_text("case", encoding="utf-8")
     case_sensitive = not (fixture_parent / "CASE-PROBE").exists()
     marker.unlink()
     require(case_sensitive or not args.require_case_sensitive, "Fixture filesystem is case-insensitive")
@@ -220,7 +220,7 @@ def main():
                     '[workspace]\n[dependencies]\nanyhow = "1"\nserde_json = "1"\n'
                     f'rfvp = {{ path = {json.dumps(str(source / "crates/rfvp"))}, default-features = false, '
                     f'features = {json.dumps(COMMON_FEATURES)} }}\n' + features)
-        (project / "Cargo.toml").write_text(manifest)
+        (project / "Cargo.toml").write_text(manifest, encoding="utf-8")
         # Seed dependency versions from the source revision, not latest registry versions.
         shutil.copyfile(source / "Cargo.lock", project / "Cargo.lock")
         command = ["cargo", "build", "--offline", "--manifest-path", str(project / "Cargo.toml"),
@@ -244,10 +244,10 @@ def main():
         # Record fixture bytes before the shared probe mutates loose/source files.
         fixtures = {p.name: sha(p.read_bytes()) for p in sorted(root.iterdir()) if p.is_file()}
         command = [str(executables[profile]), str(root), "enabled" if enabled else "disabled", nls]
-        result = subprocess.run(command, capture_output=True, text=True, check=True)
-        (output / (key + ".stderr.log")).write_text(result.stderr)
+        result = subprocess.run(command, capture_output=True, encoding="utf-8", check=True)
+        (output / (key + ".stderr.log")).write_text(result.stderr, encoding="utf-8")
         value = json.loads(result.stdout)
-        (output / (key + ".json")).write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+        (output / (key + ".json")).write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         transcripts[key] = {"fixture_sha256": fixtures, "transcript_sha256": sha(result.stdout.encode()), "result": value}
         return key, value, expected
 
@@ -297,7 +297,7 @@ def main():
               "case_sensitive": case_sensitive, "comparisons": comparisons,
               "documented_exceptions": exceptions, "validation_cases": validations,
               "transcripts": transcripts, "reference_worktrees_clean": True}
-    (output / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+    (output / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"PASS: {len(transcripts)} process runs, {len(comparisons)} comparisons; case-sensitive={case_sensitive}\nReport: {output / 'report.json'}", flush=True)
 
 

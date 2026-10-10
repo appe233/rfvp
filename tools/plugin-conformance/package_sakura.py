@@ -28,7 +28,7 @@ def main():
                     api_major=1, api_minor=0, capabilities=["script-string-table-v1", "resource-mapping-v1"],
                     module="plugin.wasm", supported_scripts=sorted(set(args.script_sha256)),
                     inputs=["patch.dat", "patch.bin"], claimed_archives=["patch.bin"])
-    (args.output / "plugin.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    (args.output / "plugin.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     print(args.output)
 
 

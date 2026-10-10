@@ -23,7 +23,7 @@ OUT = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target")) / "plugin-confor
 def validators():
     resources = {}
     for path in SCHEMAS.glob("*.schema.json"):
-        schema = json.loads(path.read_text())
+        schema = json.loads(path.read_text(encoding="utf-8"))
         Draft202012Validator.check_schema(schema)
         resources[path.name] = schema
     registry = Registry().with_resources(
@@ -60,9 +60,9 @@ def main():
     manifests = sorted(OUT.glob("*/plugin.json"))
     assert manifests, "run tools/plugin-conformance/run.py first"
     for path in manifests:
-        ok("manifest", json.loads(path.read_text()), str(path))
-    ok("plan", json.loads((OUT / "game/plan.json").read_text()), "plan.json")
-    base = json.loads(manifests[0].read_text())
+        ok("manifest", json.loads(path.read_text(encoding="utf-8")), str(path))
+    ok("plan", json.loads((OUT / "game/plan.json").read_text(encoding="utf-8")), "plan.json")
+    base = json.loads(manifests[0].read_text(encoding="utf-8"))
     for field, value in [("schema_version", 2), ("id", "Upper"), ("api_major", 2), ("capabilities", ["x"]),
                          ("supported_scripts", []), ("supported_scripts", ["ABC"]), ("inputs", ["../x"]),
                          ("inputs", ["a//b"]), ("inputs", ["a\\b"]), ("inputs", ["c:x"]), ("inputs", ["./x"]),
